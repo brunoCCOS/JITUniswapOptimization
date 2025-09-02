@@ -159,9 +159,7 @@ def test_swap_simulation():
         dec1
         )
 
-    result = swap2.simulate(
-            position2
-            )
+    result = swap2.simulate(position2)
 
     # Detailed calculation for a swap that crosses the tick boundary:
     # 1. First segment (tick 0 to 20):

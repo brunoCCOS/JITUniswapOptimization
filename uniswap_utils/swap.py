@@ -9,10 +9,9 @@ from uniswap_utils.utils import (
 )
 
 class Swap:
-    def __init__(self, amount0,amount1, start_price, passive_dict, tick_space, fee_rate, dec0, dec1):
-        self.amount0 = amount0  
-        self.amount1 = amount1  
-        self.zeroForOne = amount0 > 0 
+    def __init__(self, amount_in, zeroForOne, start_price, passive_dict, tick_space, fee_rate, dec0, dec1):
+        self.amount_in = amount_in  
+        self.zeroForOne = zeroForOne
         self.start_price = start_price
         self.passive_dict = passive_dict
         self.tick_space = tick_space
@@ -76,7 +75,7 @@ class Swap:
         getcontext().prec = 28
 
         # Initialize state
-        remaining_in = Decimal(self.amount0 if self.amount0 > 0 else self.amount1)
+        remaining_in = Decimal(self.amount_in)
         current_sqrt = Decimal(self.start_price)
         current_tick = tick_from_sqrt_price(current_sqrt,self.dec0,self.dec1)
 
