@@ -19,7 +19,7 @@ def utility(
     price_impact = end_value - init_value
     fees = (
         sim_max["fees_jit_lp"] * price0 
-        if swap.amount0 > 0 
+        if swap.zeroForOne
         else sim_max["fees_jit_lp"] * price1
     )
     utility_max = price_impact + fees
@@ -28,4 +28,3 @@ def utility(
 def main():
     #TODO
     pass
-
