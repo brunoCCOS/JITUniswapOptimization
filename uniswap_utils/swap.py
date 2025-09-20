@@ -1,5 +1,6 @@
 from decimal import Decimal, getcontext
 from uniswap_utils.position import Position
+from uniswap_utils.state import State
 from uniswap_utils.utils import (
     tick_from_sqrt_price,
     calculate_active_liquidity,
@@ -9,20 +10,18 @@ from uniswap_utils.utils import (
 )
 
 class Swap:
-    def __init__(self, amount_in, zeroForOne, start_price, passive_dict, tick_space, fee_rate, dec0, dec1):
+    def __init__(self, amount_in, zeroForOne, state):
         self.amount_in = amount_in  
         self.zeroForOne = zeroForOne
-        self.start_price = start_price
-        self.passive_dict = passive_dict
-        self.tick_space = tick_space
-        self.fee_rate = fee_rate
-        self.dec0 = dec0
-        self.dec1 = dec1
-
+        self.state = state
+    
+    def update_state(self, state: State):
+        self.state = state
+        return self.state
 
     def zeroForOneSwap(self, remaining_in, current_sqrtP, target_sqrtP, L):
         
-        fee_rate = Decimal(self.fee_rate)
+        fee_rate = Decimal(self.state.fee_rate)
 
         gross_in = remaining_in / (1 + fee_rate)
         feeAmount = remaining_in - gross_in
@@ -32,19 +31,19 @@ class Swap:
             inv_future_sqrtP = 1 / current_sqrtP + actual_in / L
             future_sqrtP = 1 / inv_future_sqrtP
             remaining_in = Decimal("0")
-            next_tick = tick_from_sqrt_price(future_sqrtP, self.dec0,self.dec1)
+            next_tick = tick_from_sqrt_price(future_sqrtP, self.state.dec0,self.state.dec1)
         else:
             actual_in = available_in
             future_sqrtP = target_sqrtP
             feeAmount = actual_in * fee_rate
             remaining_in = remaining_in - (actual_in * (1 + fee_rate))
-            next_tick = tick_from_sqrt_price(future_sqrtP, self.dec0,self.dec1) - 1
+            next_tick = tick_from_sqrt_price(future_sqrtP, self.state.dec0,self.state.dec1) - 1
         amount_out = (current_sqrtP - future_sqrtP ) * L
         return remaining_in, future_sqrtP, next_tick, amount_out, feeAmount
 
     def oneForZeroSwap(self, remaining_in, current_sqrtP, target_sqrtP, L):
 
-        fee_rate = Decimal(self.fee_rate)
+        fee_rate = Decimal(self.state.fee_rate)
 
         gross_in = remaining_in / (1 + fee_rate)
         feeAmount = remaining_in - gross_in
@@ -55,13 +54,13 @@ class Swap:
             actual_in = gross_in
             future_sqrtP = current_sqrtP + (actual_in) / L
             remaining_in = Decimal("0")
-            next_tick = tick_from_sqrt_price(future_sqrtP, self.dec0,self.dec1)
+            next_tick = tick_from_sqrt_price(future_sqrtP, self.state.dec0,self.state.dec1)
         else:
             actual_in = available_in
             future_sqrtP = target_sqrtP
             feeAmount = actual_in * fee_rate
             remaining_in = remaining_in - (actual_in * (1 + fee_rate))
-            next_tick = tick_from_sqrt_price(future_sqrtP, self.dec0,self.dec1) + 1
+            next_tick = tick_from_sqrt_price(future_sqrtP, self.state.dec0,self.state.dec1) + 1
             
         amount_out = (1 / current_sqrtP - 1 / future_sqrtP) * L
         return remaining_in, future_sqrtP, next_tick, amount_out, feeAmount
@@ -76,31 +75,31 @@ class Swap:
 
         # Initialize state
         remaining_in = Decimal(self.amount_in)
-        current_sqrt = Decimal(self.start_price)
-        current_tick = tick_from_sqrt_price(current_sqrt,self.dec0,self.dec1)
+        current_sqrt = Decimal(self.state.price)
+        current_tick = tick_from_sqrt_price(current_sqrt,self.state.dec0,self.state.dec1)
 
         # Track outputs and fees
         out_amount = Decimal(0)
         fees_passive = Decimal(0)
         fees_jit = Decimal(0)
 
-        jit_liq = position.to_dict(self.tick_space)
+        jit_liq = position.to_dict(self.state.tick_space)
 
-        ticks = get_all_ticks(self.passive_dict, jit_liq)
+        ticks = get_all_ticks(self.state.passive_dict, jit_liq)
 
         while remaining_in > 0:
             if self.zeroForOne:
                 direction = "down"
-                _, target_sqrt = get_next_tick(current_tick, ticks, direction, self.dec0, self.dec1)
-                liq_P, liq_J, L = calculate_active_liquidity(current_tick, self.passive_dict, jit_liq, self.tick_space)
+                _, target_sqrt = get_next_tick(current_tick, ticks, direction, self.state.dec0, self.state.dec1)
+                liq_P, liq_J, L = calculate_active_liquidity(current_tick, self.state.passive_dict, jit_liq, self.state.tick_space)
                 if L == 0:
                     print_debug(f"Liquidity is zero, exiting loop. Current tick:{current_tick}")
                     break
                 remaining_in, current_sqrt, current_tick, partial_out, feeAmount = self.zeroForOneSwap(remaining_in, current_sqrt, target_sqrt, L)
             else:
                 direction = "up"
-                _, target_sqrt = get_next_tick(current_tick, ticks, direction, self.dec0, self.dec1)
-                liq_P, liq_J, L = calculate_active_liquidity(current_tick, self.passive_dict, jit_liq, self.tick_space)
+                _, target_sqrt = get_next_tick(current_tick, ticks, direction, self.state.dec0, self.state.dec1)
+                liq_P, liq_J, L = calculate_active_liquidity(current_tick, self.state.passive_dict, jit_liq, self.state.tick_space)
                 if L == 0:
                     print_debug(f"Liquidity is zero, exiting loop. Current tick:{current_tick}")
                     break
