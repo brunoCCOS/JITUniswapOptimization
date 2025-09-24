@@ -1,6 +1,6 @@
 from uniswap_utils.swap import Swap
 from uniswap_utils.position import Position
-from uniswap_utils.utils import tick_from_sqrt_price
+from uniswap_utils.utils import tick_from_sqrt_price, get_rounded_tick
 
 class Utility:
     def __init__(
@@ -15,13 +15,13 @@ class Utility:
 
     def set_ticks(self, lower: int, upper: int):
         self.lower_tick = lower
-        self.uppert_tick = upper
+        self.upper_tick = upper
 
     def set_liq(self, liq: float):
         self.liq = liq
 
     def utility_liq(self, liq):
-        position = Position(liq, self.lower_tick, self.uppert_tick)
+        position = Position(liq, self.lower_tick, self.upper_tick)
         return self._utility(position)
 
     def utility_tick(self, lower,upper):
@@ -50,16 +50,66 @@ class Utility:
                  opt_func,
                  **func_args
                  ):
+        """
+        Find optimal position parameters (ticks and liquidity) within a budget.
+        
+        Args:
+            budget: Maximum amount to use for liquidity provision
+            opt_func: Search function from search.py to optimize liquidity
+            **func_args: Additional arguments for the search function
+            
+        Returns:
+            Dictionary with optimal parameters (lower_tick, upper_tick, liquidity, utility)
+        """
         # Find q*
-        null_position = Position(0,0,0)
+        null_position = Position(0, 0, 0)
         noJIT = self.swap.simulate(null_position)
         end_tick = noJIT['final_tick']
-        start_tick = tick_from_sqrt_price(self.swap.state.price,self.swap.state.dec0,self.swap.state.dec1)
-
-        for a in range (start_tick, end_tick, self.swap.state.tick_space):
-            for b in range (a, end_tick, self.swap.state.tick_space):
-                opt_func(self.utility_liq, **func_args)
-
-
+        start_tick, _ = get_rounded_tick(tick_from_sqrt_price(self.swap.state.price, self.swap.state.dec0, self.swap.state.dec1), self.swap.state.tick_space)
         
+        best_utility = float('-inf')
+        best_config = {"lower_tick": None, "upper_tick": None, "liquidity": None, "utility": None}
+        
+        # Iterate through all possible tick ranges
+        for a in range(start_tick, end_tick, self.swap.state.tick_space):
+            for b in range(a + self.swap.state.tick_space, end_tick + self.swap.state.tick_space, self.swap.state.tick_space):
+                # Set current tick range to evaluate
+                self.set_ticks(a, b)
+                print(a,b)
+                
+                # Create a position with this budget and tick range
+                position = Position(0, a, b)
+                # Calculate max liquidity possible with budget
+                max_liq = position.liqudity_from_budget(
+                    budget,
+                    self.swap.state.price,
+                    self.price0,
+                    self.price1,
+                    self.swap.state.dec0,
+                    self.swap.state.dec1
+                )
+                
+                # Define bounds for liquidity search (0 to max_liq)
+                liq_bounds = (0, max_liq)
+                print(liq_bounds)
+                
+                # Use provided search function to find optimal liquidity
+                optimal_liq = opt_func(self.utility_liq, *liq_bounds, **func_args)
+                optimal_utility = self.utility_liq(optimal_liq)
+                print(optimal_utility)
+                
+                # Update best configuration if current is better
+                if optimal_utility > best_utility:
+                    best_utility = optimal_utility
+                    best_config = {
+                        "lower_tick": a,
+                        "upper_tick": b,
+                        "liquidity": optimal_liq,
+                        "utility": optimal_utility
+                    }
+        
+        return best_config
+
+
+            
 

@@ -1,12 +1,15 @@
 from decimal import Decimal
+from uniswap_utils import Numerical
 import os
 
 
-def print_debug(msg):
+def print_debug(msg: str):
     if os.getenv("DEBUG") == "1":
         print(msg)
 
-def sqrt_price_from_tick(tick, dec0, dec1):
+def sqrt_price_from_tick(tick: int,
+                         dec0: int,
+                         dec1: int):
     """
     Compute actual sqrt(price) from a given tick index, accounting for token decimals.
         sqrt(P) = 1.0001^(tick/2) / 10^((dec1 - dec0)/2)
@@ -18,7 +21,7 @@ def sqrt_price_from_tick(tick, dec0, dec1):
     return sqrt_price
 
 
-def tick_from_sqrt_price(sqrt_price, dec0, dec1):
+def tick_from_sqrt_price(sqrt_price: Numerical, dec0:int, dec1:int):
     """
     Compute the tick index (rounded down) from an actual sqrt(price), accounting for token decimals.
     Uses a binary search to find the highest tick such that:
@@ -43,7 +46,11 @@ def tick_from_sqrt_price(sqrt_price, dec0, dec1):
     return floor_tick
 
 
-def calculate_active_liquidity(current_tick, passive_liq, jit_liq, tick_space):
+def calculate_active_liquidity(
+        current_tick: int,
+        passive_liq: dict[int, Numerical],
+        jit_liq: dict[int, Numerical],
+        tick_space: int):
     """
     Calculate the active liquidity at the current tick, based on the tick space.
 
@@ -72,8 +79,20 @@ def get_all_ticks(passive_liq, jit_liq):
     """
     return sorted(set(list(passive_liq.keys()) + list(jit_liq.keys())))
 
+def get_rounded_tick(tick: int, tick_space: int):
+    """
+    Return which minting available tick the specified tick is whithin
+    """
+    lower_tick = (tick // tick_space) * tick_space
+    upper_tick = lower_tick + tick_space
+    return lower_tick, upper_tick
 
-def get_next_tick(current_tick, tick_list, direction, dec0, dec1):
+def get_next_tick(current_tick: int,
+                  tick_space: int,
+                  direction: str,
+                  dec0: int,
+                  dec1:int 
+                  ):
     """
     Determine the next tick and corresponding target sqrt(price) in the specified direction.
     For zeroForOne (direction="down"), we need the maximum tick that is < current_tick.
@@ -81,20 +100,11 @@ def get_next_tick(current_tick, tick_list, direction, dec0, dec1):
     If no tick is found, a limit is set (very low for down, very high for up).
     Returns (next_tick, target_sqrtP). next_tick is None if no tick boundary is available.
     """
+    lower_tick,_ = get_rounded_tick(current_tick, tick_space)
     if direction == "down":
-        lower_ticks = [t for t in tick_list if t < current_tick]
-        if lower_ticks:
-            next_tick = max(lower_ticks)
-            target_sqrtP = sqrt_price_from_tick(next_tick, dec0, dec1)
-        else:
-            next_tick = None
-            target_sqrtP = Decimal("1e-20")  # Effectively zero
+        next_tick = lower_tick - tick_space
+        target_sqrtP = sqrt_price_from_tick(next_tick, dec0, dec1)
     else:  # direction == "up"
-        upper_ticks = [t for t in tick_list if t > current_tick]
-        if upper_ticks:
-            next_tick = min(upper_ticks)
-            target_sqrtP = sqrt_price_from_tick(next_tick, dec0, dec1)
-        else:
-            next_tick = None
-            target_sqrtP = Decimal("1e20")  # Effectively infinite
+        next_tick = lower_tick + tick_space
+        target_sqrtP = sqrt_price_from_tick(next_tick, dec0, dec1)
     return next_tick, target_sqrtP

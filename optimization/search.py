@@ -1,69 +1,56 @@
 import math
 import random
 
-def ternary_search_max(func, left, right, epsilon=1e-9):
-    """
-    Ternary search to find maximum of unimodal function.
-    
-    Args:
-        func: Function to optimize (should have single peak)
-        left, right: Search bounds
-        epsilon: Precision threshold
-    
-    Returns:
-        x value where function reaches maximum
-    """
-    while right - left > epsilon:
-        m1 = left + (right - left) / 3
-        m2 = right - (right - left) / 3
-        
-        if func(m1) < func(m2):
-            left = m1  # Maximum is in right 2/3
+def ternary_search_max(func, low, high, epsilon=1e-6):
+    a, b = low, high
+    # Evaluate at boundaries initially
+    f_low = func(low)
+    f_high = func(high)
+    while b - a > epsilon:
+        mid1 = a + (b - a)/3
+        mid2 = b - (b - a)/3
+        f1 = func(mid1)
+        f2 = func(mid2)
+        if f1 > f2:
+            b = mid2
         else:
-            right = m2  # Maximum is in left 2/3
-    
-    return (left + right) / 2
+            a = mid1
+    # After loop, evaluate at final a, b, and mid
+    mid = (a + b) / 2
+    f_mid = func(mid)
+    f_a = func(a)
+    f_b = func(b)
+    # Find the maximum among final a, b, mid
+    candidates = [(f_low, low), (f_high, high), (f_a, a), (f_b, b), (f_mid, mid)]
+    best_f, best_x = max(candidates, key=lambda x: x[0])
+    return best_x
 
 
-def ternary_search_min(func, left, right, epsilon=1e-9):
-    """
 
-    """
-    while right - left > epsilon:
-        m1 = left + (right - left) / 3
-        m2 = right - (right - left) / 3
-        
-        if func(m1) > func(m2):
-            left = m1
+def golden_section_search(func, low, high, epsilon=1e-6):
+    a, b = low, high
+    # Evaluate at boundaries initially
+    f_low = func(low)
+    f_high = func(high)
+    phi = (1 + math.sqrt(5)) / 2
+    while b - a > epsilon:
+        mid1 = b - (b - a) / phi
+        mid2 = a + (b - a) / phi
+        f1 = func(mid1)
+        f2 = func(mid2)
+        if f1 > f2:
+            a = mid1
         else:
-            right = m2
-    
-    return (left + right) / 2
-
-
-
-def golden_section_search(func, left, right, epsilon=1e-9):
-    """
-    Golden section search - optimal for unimodal functions.
-    Uses golden ratio to minimize function evaluations.
-    """
-    phi = (1 + math.sqrt(5)) / 2  # Golden ratio
-    
-    x1 = right - (right - left) / phi
-    x2 = left + (right - left) / phi
-    f1, f2 = func(x1), func(x2)
-    
-    while abs(right - left) > epsilon:
-        if f1 > f2:  # Maximum in [left, x2]
-            right, x2, f2 = x2, x1, f1
-            x1 = right - (right - left) / phi
-            f1 = func(x1)
-        else:  # Maximum in [x1, right]
-            left, x1, f1 = x1, x2, f2
-            x2 = left + (right - left) / phi
-            f2 = func(x2)
-    
-    return (left + right) / 2
+            b = mid2
+    # After loop, evaluate at final a, b, and mid
+    mid = (a + b) / 2
+    f_mid = func(mid)
+    f_a = func(a)
+    f_b = func(b)
+    # Find the maximum among final a, b, mid
+    candidates = [(f_low, low), (f_high, high), (f_a, a), (f_b, b), (f_mid, mid)]
+    best_f, best_x = max(candidates, key=lambda x: x[0])
+    return best_x
 
 
 def fibonacci_search(func, left, right, n=20):

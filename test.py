@@ -1,8 +1,10 @@
 from decimal import Decimal
 from uniswap_utils.position import Position
 from uniswap_utils.swap import Swap
+from uniswap_utils.state import State
 from uniswap_utils.utils import sqrt_price_from_tick, tick_from_sqrt_price
-
+from optimization.utility import Utility
+from optimization.search import ternary_search_max
 
 def test_sqrt_price_conversion():
     """Test that tick to sqrt price conversion and back works correctly"""
@@ -54,9 +56,9 @@ def test_position_calculation():
     liquidity = Decimal("10")
     dec0 = 18
     dec1 = 18
-    lower_tick = tick_from_sqrt_price(0,dec0,dec1)
-    upper_tick = tick_from_sqrt_price(2,dec0,dec1)
-    current_tick = tick_from_sqrt_price(0.5,dec0,dec1)
+    lower_tick = -10
+    upper_tick = 10
+    current_tick = 0
     current_sqrtP = sqrt_price_from_tick(current_tick, dec0, dec1)
 
     position = Position(liquidity, lower_tick , upper_tick)
@@ -102,16 +104,15 @@ def test_swap_simulation():
     # Create a liquidity profile with a single position at tick 0
     passive_liq = {-10: liquidity, 0: liquidity}
 
-    swap = Swap(
-        amount_in,
-        zeroForOne,
-        initial_price,
-        passive_liq,
-        tick_space,
-        fee_rate,
-        dec0,
-        dec1
-        )
+    state = State(
+        price=initial_price,
+        passive_dict=passive_liq,
+        tick_space=tick_space,
+        fee_rate=fee_rate,
+        dec0=dec0,
+        dec1=dec1
+    )
+    swap = Swap(amount_in, zeroForOne, state)
 
     result = swap.simulate(
         position,
@@ -141,23 +142,23 @@ def test_swap_simulation():
     amount_in = 2000
     zeroForOne = False  # token1 in, token0 out (price increases)
     initial_price = 1.0
-    passive_liq = {0: 500_000, 20: 200_000}  # Liquidity at ticks 0 and 20
+    passive_liq = {0: 500_000, 20: 1_000_000}  # Liquidity at ticks 0 and 20
     tick_space = 20
     fee_rate = Decimal("0.003")
     dec0 = 18
     dec1 = 18
+
     position2 = Position(500_000, 0, 20)
 
-    swap2 = Swap(
-        amount_in,
-        zeroForOne,
-        initial_price,
-        passive_liq,
-        tick_space,
-        fee_rate,
-        dec0,
-        dec1
-        )
+    state2 = State(
+        price=initial_price,
+        passive_dict=passive_liq,
+        tick_space=tick_space,
+        fee_rate=fee_rate,
+        dec0=dec0,
+        dec1=dec1
+    )
+    swap2 = Swap(amount_in, zeroForOne, state2)
 
     result = swap2.simulate(position2)
 
@@ -175,13 +176,14 @@ def test_swap_simulation():
     # 2. Second segment (after tick 20):
     #    - Remaining token1: 2,000 - 1,003.45 = 996.55
     #    - Liquidity at tick 20 = 200,000 (only passive)
-    #    - Continue with this liquidity...
+    #    - √P₁ at tick 40 ≈ 1.002001901140
+    #    - Amount of token1 needed to reach tick 40: 200,000 * (1.002001901140 - 1.001000450120021) ≈ 200.290203996 
 
     # Expected values based on calculations
     expected_output_approx = 1900.0  # Output token0 amount
     expected_passive_fee_approx = 4.8  # Passive LP fees (both ticks)
     expected_jit_fee_approx = 1.5  # JIT LP fees (only at tick 0)
-    expected_sqrt_price_approx = 1.006  # Final sqrt price
+    expected_sqrt_price_approx = 1.002  # Final sqrt price
 
     print("Complex swap test with both passive and JIT liquidity:")
     print(f"Amount in: {amount_in}, zeroForOne: {zeroForOne}, initial price: {initial_price}")
@@ -198,8 +200,52 @@ def test_swap_simulation():
     print(f"Final price within range: {abs(result['final_sqrt_price'] - expected_sqrt_price_approx) / expected_sqrt_price_approx < 0.05}")
     print()
 
+def test_optimization():
+    """Test optimization of JIT liquidity provision"""
+    print("Testing optimization...")
+
+    amount_in = 2000
+    zeroForOne = False
+    initial_price = 1.0
+    passive_liq = {0: 700_000.0, 20: 1_500_000.0, 40: 700_000}
+    tick_space = 20
+    fee_rate = Decimal("0.003")
+    dec0 = 18
+    dec1 = 18
+
+    state = State(
+        price=initial_price,
+        passive_dict=passive_liq,
+        tick_space=tick_space,
+        fee_rate=fee_rate,
+        dec0=dec0,
+        dec1=dec1
+    )
+    
+    swap = Swap(amount_in, zeroForOne, state)
+
+    # External prices for utility calculation
+    price0 = 1.0
+    price1 = 1.0
+
+    utility = Utility(swap, price0, price1)
+
+    # Budget for liquidity provision
+    budget = 1000.0
+
+    # Optimize
+    opt_result = utility.optimize(budget, ternary_search_max, epsilon=1e-6)
+
+    print("Optimization test:")
+    print(f"Budget: {budget}")
+    print(f"Optimal lower tick: {opt_result['lower_tick']}")
+    print(f"Optimal upper tick: {opt_result['upper_tick']}")
+    print(f"Optimal liquidity: {opt_result['liquidity']:.6f}")
+    print(f"Optimal utility: {opt_result['utility']:.6f}")
+    print()
 
 if __name__ == "__main__":
     test_sqrt_price_conversion()
     test_position_calculation()
     test_swap_simulation()
+    test_optimization()

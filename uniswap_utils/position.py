@@ -1,24 +1,32 @@
 from decimal import Decimal
 from uniswap_utils.utils import sqrt_price_from_tick
+from uniswap_utils import Numerical
 import numpy as np
 
 class Position:
-    def __init__(self, liq, lower_tick, upper_tick):
+    def __init__(self,
+                 liq: Numerical,
+                 lower_tick: int,
+                 upper_tick: int):
         self.lower_tick = lower_tick
         self.upper_tick = upper_tick
         self.liq = liq
 
-    def to_dict(self, tick_space):
+    def __str__(self):
+        return f"Liquidity:{self.liq}, lower_tick:{self.lower_tick}, upper_tick: {self.upper_tick}"
+
+
+    def to_dict(self, tick_space: int) -> dict[int, Numerical]:
         return {tick:self.liq for tick in range(self.lower_tick,self.upper_tick, tick_space)}
 
     def value(
         self,
-        current_sqrtP,
-        price0,
-        price1,
-        dec0,
-        dec1
-        ):
+        current_sqrtP: Numerical,
+        price0: float,
+        price1: float,
+        dec0: int,
+        dec1: int
+        ) -> Numerical:
 
         # Calculate base budget for providing max_passive_liq across the entire swap range
         amt0, amt1 = self.tokens(current_sqrtP, dec0, dec1)
@@ -27,12 +35,12 @@ class Position:
 
     def liqudity_from_budget(
         self,
-        budget,
-        current_sqrtP,
-        price0,price1,
-        dec0,
-        dec1
-    ):
+        budget: Numerical,
+        current_sqrtP: Numerical,
+        price0: Numerical, price1: Numerical,
+        dec0: int,
+        dec1: int
+    ) -> Numerical:
         """
         Given a budget and a tick range (lower_tick, upper_tick), compute the liquidity amount.
         If inputs are not Decimals, they are cast to Decimal.
@@ -66,7 +74,10 @@ class Position:
 
 
     def tokens(
-        self, current_sqrtP, dec0, dec1
+            self,
+            current_sqrtP:Numerical,
+            dec0: int,
+            dec1: int
     ):
         """
         Given a liquidity amount and a tick range (lower_tick, upper_tick), compute the amounts of token0 and token1.
@@ -97,7 +108,6 @@ class Position:
         sqrtP_lower = sqrt_price_from_tick(lower_tick, dec0, dec1)
         sqrtP_upper = sqrt_price_from_tick(upper_tick, dec0, dec1)
 
-        print("Tchau:",self.liq, liquidity, current_sqrtP, sqrtP_lower, sqrtP_upper)
         if current_sqrtP <= sqrtP_lower:
             token0 = liquidity * ((Decimal(1) / sqrtP_lower) - (Decimal(1) / sqrtP_upper))
             token1 = Decimal(0)

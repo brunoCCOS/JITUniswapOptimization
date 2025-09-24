@@ -85,23 +85,21 @@ class Swap:
 
         jit_liq = position.to_dict(self.state.tick_space)
 
-        ticks = get_all_ticks(self.state.passive_dict, jit_liq)
-
         while remaining_in > 0:
             if self.zeroForOne:
                 direction = "down"
-                _, target_sqrt = get_next_tick(current_tick, ticks, direction, self.state.dec0, self.state.dec1)
+                _, target_sqrt = get_next_tick(current_tick, self.state.tick_space, direction, self.state.dec0, self.state.dec1)
                 liq_P, liq_J, L = calculate_active_liquidity(current_tick, self.state.passive_dict, jit_liq, self.state.tick_space)
                 if L == 0:
-                    print_debug(f"Liquidity is zero, exiting loop. Current tick:{current_tick}")
+                    print(f"Liquidity is zero, exiting loop. Current tick:{current_tick}")
                     break
                 remaining_in, current_sqrt, current_tick, partial_out, feeAmount = self.zeroForOneSwap(remaining_in, current_sqrt, target_sqrt, L)
             else:
                 direction = "up"
-                _, target_sqrt = get_next_tick(current_tick, ticks, direction, self.state.dec0, self.state.dec1)
+                _, target_sqrt = get_next_tick(current_tick, self.state.tick_space, direction, self.state.dec0, self.state.dec1)
                 liq_P, liq_J, L = calculate_active_liquidity(current_tick, self.state.passive_dict, jit_liq, self.state.tick_space)
                 if L == 0:
-                    print_debug(f"Liquidity is zero, exiting loop. Current tick:{current_tick}")
+                    print(f"Liquidity is zero, exiting loop. Current tick:{current_tick}")
                     break
                 remaining_in, current_sqrt, current_tick, partial_out, feeAmount = self.oneForZeroSwap(remaining_in, current_sqrt, target_sqrt, L)
 
