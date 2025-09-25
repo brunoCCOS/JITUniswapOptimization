@@ -13,9 +13,9 @@ dec1 = 18
 initial_tick, _ = get_rounded_tick(tick_from_sqrt_price(pool_price_sqrt,dec0,dec1), tick_space)
 
 # Market prices (price0/price1)
-price0 = 1.004  # Token 0 price
-price1 = 0.994  # Token 1 price
-market_price = price0/price1  # = 8, which is below pool price of 10
+price0 = 1.004
+price1 = 0.994
+market_price = price0/price1  
 
 # Set up the state
 state = State(
@@ -35,7 +35,7 @@ swap = Swap(zeroForOne=False, amount_in=5000, state=state)
 maximizer = Utility(swap, price0, price1)
 
 # Budget for liquidity
-budget = 10000
+budget = 10_000
 
 # Find the optimal position
 optimal = maximizer.optimize(

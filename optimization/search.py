@@ -23,7 +23,7 @@ def ternary_search_max(func, low, high, epsilon=1e-6):
     # Find the maximum among final a, b, mid
     candidates = [(f_low, low), (f_high, high), (f_a, a), (f_b, b), (f_mid, mid)]
     best_f, best_x = max(candidates, key=lambda x: x[0])
-    return best_x
+    return best_f, best_x
 
 
 
@@ -50,7 +50,7 @@ def golden_section_search(func, low, high, epsilon=1e-6):
     # Find the maximum among final a, b, mid
     candidates = [(f_low, low), (f_high, high), (f_a, a), (f_b, b), (f_mid, mid)]
     best_f, best_x = max(candidates, key=lambda x: x[0])
-    return best_x
+    return best_f, best_x
 
 
 def fibonacci_search(func, left, right, n=20):
@@ -76,37 +76,37 @@ def fibonacci_search(func, left, right, n=20):
             x2 = left + (fib[i-1] / fib[i]) * (right - left)
             f2 = func(x2) if i > 1 else f2
     
-    return (left + right) / 2
+    return func((left + right) / 2),(left + right) / 2
 
-def random_search(func, bounds, n_samples=100):
+def random_search(func, low, high, n_samples=100):
     """
     Random search - simple but effective for multimodal functions.
     """
     best_x, best_val = None, float('-inf')
     
     for _ in range(n_samples):
-        x = random.uniform(bounds[0], bounds[1])
+        x = random.uniform(low, high)
         val = func(x)
         if val > best_val:
             best_x, best_val = x, val
     
     return best_x
 
-def adaptive_random_search(func, bounds, n_samples=100, shrink_factor=0.8):
+def adaptive_random_search(func, low, high, n_samples=100, shrink_factor=0.8):
     """
     Adaptive random search - focuses sampling around best points.
     """
-    best_x = random.uniform(bounds[0], bounds[1])
+    best_x = random.uniform(low, high)
     best_val = func(best_x)
-    search_radius = (bounds[1] - bounds[0]) / 4
+    search_radius = (high - low) / 4
     
     for _ in range(n_samples - 1):
         x = best_x + random.uniform(-search_radius, search_radius)
-        x = max(bounds[0], min(bounds[1], x))  # Clamp to bounds
+        x = max(low, min(high, x))  # Clamp to bounds
         
         val = func(x)
         if val > best_val:
             best_x, best_val = x, val
             search_radius *= shrink_factor  # Focus search
     
-    return best_x
+    return best_val, best_x

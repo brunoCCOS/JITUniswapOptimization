@@ -65,7 +65,8 @@ class Utility:
         null_position = Position(0, 0, 0)
         noJIT = self.swap.simulate(null_position)
         end_tick = noJIT['final_tick']
-        start_tick, _ = get_rounded_tick(tick_from_sqrt_price(self.swap.state.price, self.swap.state.dec0, self.swap.state.dec1), self.swap.state.tick_space)
+        current_tick = tick_from_sqrt_price(self.swap.state.price, self.swap.state.dec0, self.swap.state.dec1)
+        start_tick, _ = get_rounded_tick(current_tick, self.swap.state.tick_space)
         
         best_utility = float('-inf')
         best_config = {"lower_tick": None, "upper_tick": None, "liquidity": None, "utility": None}
@@ -75,7 +76,6 @@ class Utility:
             for b in range(a + self.swap.state.tick_space, end_tick + self.swap.state.tick_space, self.swap.state.tick_space):
                 # Set current tick range to evaluate
                 self.set_ticks(a, b)
-                print(a,b)
                 
                 # Create a position with this budget and tick range
                 position = Position(0, a, b)
@@ -91,12 +91,9 @@ class Utility:
                 
                 # Define bounds for liquidity search (0 to max_liq)
                 liq_bounds = (0, max_liq)
-                print(liq_bounds)
                 
                 # Use provided search function to find optimal liquidity
-                optimal_liq = opt_func(self.utility_liq, *liq_bounds, **func_args)
-                optimal_utility = self.utility_liq(optimal_liq)
-                print(optimal_utility)
+                optimal_utility, optimal_liq = opt_func(self.utility_liq, *liq_bounds, **func_args)
                 
                 # Update best configuration if current is better
                 if optimal_utility > best_utility:
