@@ -6,6 +6,13 @@ Lemmas 5.1 / 5.2 (no swap simulation, no line search), then the best range is
 selected. j=0 is the range containing the initial price; j increases toward the
 counterfactual final price (the price the swap would reach without JIT).
 
+The MATLAB derivation is for a downward (zeroForOne) swap: token0 in, price
+falling, JIT liquidity placed below the price and funded with token1. Rather
+than mirror every formula, an upward (oneForZero) swap is reframed once into
+those same "canonical" coordinates by swapping the token roles and inverting the
+prices (sqrt(P) -> 1/sqrt(P)). The body then runs a single direction-agnostic
+code path. Only the reported tick range is mapped back to the pool's frame.
+
 Note: this optimizes the paper's closed-form utility model, which is a different
 objective from the simulation-based utility used by the combinatorial optimizer
 (see optimization.utility.Utility._optimize_combinatorial). The two agree on the
@@ -38,7 +45,8 @@ class TickParams:
     L_inner: float    # interior (first-order) solution
     L0: float         # minimum liquidity to absorb the remaining trade
     L_max: float      # budget cap
-    cap_per_L: float  # input token absorbed per unit liquidity across the range
+    cap_per_L: float  # input token per L across the full range
+    traversed_cap: float  # input token per L actually traversed (partial for j=0)
 
 
 class AnalyticalOptimizer:
@@ -58,20 +66,25 @@ class AnalyticalOptimizer:
         dec0, dec1 = state.dec0, state.dec1
         F = 1.0 + float(state.fee_rate)
         Delta_x = float(self.swap.amount_in)
+        direction_up = not self.swap.zeroForOne
 
-        # Direction and USD prices of the input (px) / output (py) tokens.
-        if self.swap.zeroForOne:      # token0 in, price moves down
-            px, py = float(self.price0), float(self.price1)
-            direction_up = False
-        else:                          # token1 in, price moves up
-            px, py = float(self.price1), float(self.price0)
-            direction_up = True
+        # Reframe into canonical (downward) coordinates. px/py are the USD prices
+        # of the input/output tokens; canon_sqrt maps a tick to its sqrt price in
+        # the canonical frame (identity for a down swap, inverted for an up swap).
+        pool_sqrt = float(state.price)
+        if direction_up:
+            px, py = float(self.price1), float(self.price0)  # in=token1, out=token0
+            init_sqrt = 1.0 / pool_sqrt
+            canon_sqrt = lambda t: 1.0 / float(sqrt_price_from_tick(t, dec0, dec1))
+        else:
+            px, py = float(self.price0), float(self.price1)  # in=token0, out=token1
+            init_sqrt = pool_sqrt
+            canon_sqrt = lambda t: float(sqrt_price_from_tick(t, dec0, dec1))
 
         # Budget in units of the token the JIT LP deposits (the output token py),
         # mirroring MATLAB's B, where L_max = B / eps.
         B_tokens = budget / py
 
-        init_sqrt = float(state.price)
         current_tick = tick_from_sqrt_price(state.price, dec0, dec1)
         start_tick, _ = get_rounded_tick(current_tick, ts)
         end_tick = self.swap.simulate(Position(0, 0, 0))["final_tick"]
@@ -83,7 +96,7 @@ class AnalyticalOptimizer:
             return self._empty()
 
         params = self._precompute(
-            ranges, Delta_x, B_tokens, px, py, F, direction_up, init_sqrt, dec0, dec1
+            ranges, Delta_x, B_tokens, px, py, F, init_sqrt, canon_sqrt
         )
         return self._solve(params, F, px)
 
@@ -106,33 +119,44 @@ class AnalyticalOptimizer:
         return ranges
 
     def _precompute(self, ranges, Delta_x, B_tokens, px, py, F,
-                    direction_up, init_sqrt, dec0, dec1) -> list[TickParams]:
-        def sp(tick):
-            return float(sqrt_price_from_tick(tick, dec0, dec1))
+                    init_sqrt, canon_sqrt) -> list[TickParams]:
+        """Per-range parameters in canonical (downward) coordinates.
+
+        In this frame the input token flows as 1/sqrt(P) and the deposited token
+        as sqrt(P), so the formulas are the single MATLAB down-direction form
+        regardless of the actual swap direction.
+        """
+        # Fee is charged on top, so the net trade that actually moves the price
+        # (and that passive liquidity absorbs) is the gross amount divided by F.
+        net_total = Delta_x / F
 
         out: list[TickParams] = []
         for j, (lower, upper) in enumerate(ranges):
-            sqrt_lo, sqrt_hi = sp(lower), sp(upper)
+            # Canonical sqrt-price bounds (sqrt_lo < sqrt_hi always).
+            a, b = canon_sqrt(lower), canon_sqrt(upper)
+            sqrt_lo, sqrt_hi = min(a, b), max(a, b)
 
-            if direction_up:
-                cap_per_L = sqrt_hi - sqrt_lo               # input token1 per L
-                eps_budget = 1.0 / sqrt_lo - 1.0 / sqrt_hi  # deposit token0 per L
+            cap_per_L = 1.0 / sqrt_lo - 1.0 / sqrt_hi   # input token per L, full range
+            eps_budget = sqrt_hi - sqrt_lo              # deposited token per L
+
+            # Capacity the trade actually traverses in this range. The swap starts
+            # inside range j=0, so it only crosses from the initial price to the
+            # boundary, not the full range; deeper ranges are fully traversed.
+            if j == 0:
+                traversed_cap = max(0.0, 1.0 / sqrt_lo - 1.0 / init_sqrt)
             else:
-                cap_per_L = 1.0 / sqrt_lo - 1.0 / sqrt_hi   # input token0 per L
-                eps_budget = sqrt_hi - sqrt_lo              # deposit token1 per L
+                traversed_cap = cap_per_L
 
-            # Remaining trade after passive liquidity absorbs the earlier ranges.
-            dx = Delta_x
+            # Remaining trade after passive liquidity absorbs the earlier ranges,
+            # using each range's actually-traversed capacity.
+            dx = net_total
             for i in range(j):
-                dx -= out[i].P * out[i].cap_per_L
+                dx -= out[i].P * out[i].traversed_cap
             dx = max(0.0, dx)
 
             # Entry price: actual initial price for j=0, else the boundary the
-            # trade first reaches (lower boundary going up, upper going down).
-            if j == 0:
-                sqrt_j = init_sqrt
-            else:
-                sqrt_j = sqrt_lo if direction_up else sqrt_hi
+            # trade first reaches (the higher sqrt price in canonical coords).
+            sqrt_j = init_sqrt if j == 0 else sqrt_hi
             price_j = sqrt_j * sqrt_j
 
             P = float(self.swap.state.passive_dict.get(lower, 0.0))
@@ -144,7 +168,7 @@ class AnalyticalOptimizer:
             L_max = B_tokens / eps_budget if eps_budget > 0 else 0.0
 
             if j == 0:
-                L0 = (Delta_x / cap_per_L - P) if cap_per_L > 0 else 0.0
+                L0 = (net_total / cap_per_L - P) if cap_per_L > 0 else 0.0
             else:
                 Dm = dx - P * cap_per_L
                 cap_prev = out[j - 1].cap_per_L
@@ -152,7 +176,7 @@ class AnalyticalOptimizer:
             L0 = max(0.0, L0)
 
             out.append(TickParams(lower, upper, P, dx, R, C, A,
-                                  L_inner, L0, L_max, cap_per_L))
+                                  L_inner, L0, L_max, cap_per_L, traversed_cap))
         return out
 
     def _solve(self, params: list[TickParams], F, px) -> dict:
