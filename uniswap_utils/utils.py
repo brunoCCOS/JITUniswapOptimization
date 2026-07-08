@@ -102,7 +102,10 @@ def get_next_tick(current_tick: int,
     """
     lower_tick,_ = get_rounded_tick(current_tick, tick_space)
     if direction == "down":
-        next_tick = lower_tick - tick_space
+        # Next boundary going down is the current range's lower tick, so this
+        # step uses the current range's liquidity down to that boundary, then
+        # the next range's liquidity is loaded below it.
+        next_tick = lower_tick
         target_sqrtP = sqrt_price_from_tick(next_tick, dec0, dec1)
     else:  # direction == "up"
         next_tick = lower_tick + tick_space

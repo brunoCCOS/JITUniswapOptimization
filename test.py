@@ -234,7 +234,9 @@ def test_optimization():
     budget = 1000.0
 
     # Optimize
-    opt_result = utility.optimize(budget, ternary_search_max, epsilon=1e-6)
+    opt_result = utility.optimize(
+        budget, method="combinatorial", opt_func=ternary_search_max, epsilon=1e-6
+    )
 
     print("Optimization test:")
     print(f"Budget: {budget}")

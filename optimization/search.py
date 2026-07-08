@@ -90,7 +90,7 @@ def random_search(func, low, high, n_samples=100):
         if val > best_val:
             best_x, best_val = x, val
     
-    return best_x
+    return best_val, best_x
 
 def adaptive_random_search(func, low, high, n_samples=100, shrink_factor=0.8):
     """

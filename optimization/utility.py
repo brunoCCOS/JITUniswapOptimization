@@ -1,6 +1,6 @@
 from uniswap_utils.swap import Swap
 from uniswap_utils.position import Position
-from uniswap_utils.utils import tick_from_sqrt_price, get_rounded_tick
+from optimization.search import ternary_search_max
 
 class Utility:
     def __init__(
@@ -28,6 +28,12 @@ class Utility:
         position = Position(self.liq, lower, upper)
         return self._utility(position)
 
+    def position_utility(self, lower_tick, upper_tick, liq):
+        """Simulation-based utility of a given position (end_value - init_value + fees)."""
+        if liq is None:
+            return None
+        return self._utility(Position(liq, lower_tick, upper_tick))
+
     def _utility(self, position):
         init_amt0, init_amt1 = position.tokens(self.swap.state.price, self.swap.state.dec0, self.swap.state.dec1)
         init_value = init_amt0 * self.price0 + init_amt1 * self.price1
@@ -47,66 +53,68 @@ class Utility:
 
     def optimize(self,
                  budget,
-                 opt_func,
+                 method="combinatorial",
+                 opt_func=ternary_search_max,
                  **func_args
                  ):
         """
         Find optimal position parameters (ticks and liquidity) within a budget.
-        
+
+        Dispatches to one of two interchangeable strategies to pick a position
+        (lower_tick, upper_tick, liquidity):
+        - "combinatorial": brute-force every tick range + line search on liquidity
+          (slow, model-free).
+        - "analytical": closed-form solution (Lemmas 5.1/5.2, ported from MATLAB),
+          computing the optimal liquidity per candidate tick directly (fast).
+
+        The optimizers only choose the position. The reported utility is always
+        computed the same way afterward, via swap simulation (position_utility),
+        so results are comparable regardless of which optimizer was used.
+
         Args:
-            budget: Maximum amount to use for liquidity provision
-            opt_func: Search function from search.py to optimize liquidity
-            **func_args: Additional arguments for the search function
-            
+            budget: Maximum amount to use for liquidity provision.
+            method: "combinatorial" (default) or "analytical".
+            opt_func: Search function from search.py (combinatorial method only).
+            **func_args: Extra args forwarded to opt_func (combinatorial method only).
+
         Returns:
-            Dictionary with optimal parameters (lower_tick, upper_tick, liquidity, utility)
+            Dictionary with optimal parameters (lower_tick, upper_tick, liquidity, utility).
         """
-        # Find q*
-        null_position = Position(0, 0, 0)
-        noJIT = self.swap.simulate(null_position)
-        end_tick = noJIT['final_tick']
-        current_tick = tick_from_sqrt_price(self.swap.state.price, self.swap.state.dec0, self.swap.state.dec1)
-        start_tick, _ = get_rounded_tick(current_tick, self.swap.state.tick_space)
-        
-        best_utility = float('-inf')
-        best_config = {"lower_tick": None, "upper_tick": None, "liquidity": None, "utility": None}
-        
-        # Iterate through all possible tick ranges
-        for a in range(start_tick, end_tick, self.swap.state.tick_space):
-            for b in range(a + self.swap.state.tick_space, end_tick + self.swap.state.tick_space, self.swap.state.tick_space):
-                # Set current tick range to evaluate
-                self.set_ticks(a, b)
-                
-                # Create a position with this budget and tick range
-                position = Position(0, a, b)
-                # Calculate max liquidity possible with budget
-                max_liq = position.liqudity_from_budget(
-                    budget,
-                    self.swap.state.price,
-                    self.price0,
-                    self.price1,
-                    self.swap.state.dec0,
-                    self.swap.state.dec1
-                )
-                
-                # Define bounds for liquidity search (0 to max_liq)
-                liq_bounds = (0, max_liq)
-                
-                # Use provided search function to find optimal liquidity
-                optimal_utility, optimal_liq = opt_func(self.utility_liq, *liq_bounds, **func_args)
-                
-                # Update best configuration if current is better
-                if optimal_utility > best_utility:
-                    best_utility = optimal_utility
-                    best_config = {
-                        "lower_tick": a,
-                        "upper_tick": b,
-                        "liquidity": optimal_liq,
-                        "utility": optimal_utility
-                    }
-        
-        return best_config
+        if method in ("combinatorial", "combinatory", "numerical"):
+            position = self._optimize_combinatorial(budget, opt_func, **func_args)
+        elif method == "analytical":
+            position = self._optimize_analytical(budget)
+        else:
+            raise ValueError(
+                f"Unknown optimization method {method!r}; "
+                "expected 'combinatorial' or 'analytical'."
+            )
 
+        return {
+            **position,
+            "utility": self.position_utility(
+                position["lower_tick"], position["upper_tick"], position["liquidity"]
+            ),
+        }
 
-            
+    def _optimize_combinatorial(self, budget, opt_func, **func_args):
+        """
+        Brute-force optimizer (tick-range search + liquidity line search).
 
+        Delegates to optimization.combinatorial.CombinatorialOptimizer, which
+        scores candidates via full swap simulation using this Utility's scoring.
+        """
+        from optimization.combinatorial import CombinatorialOptimizer
+
+        return CombinatorialOptimizer(self).optimize(budget, opt_func, **func_args)
+
+    def _optimize_analytical(self, budget):
+        """
+        Closed-form optimizer (Lemmas 5.1 / 5.2), ported from the MATLAB code.
+
+        Delegates to optimization.analytical.AnalyticalOptimizer, which computes
+        the optimal liquidity per candidate tick range directly (no simulation).
+        """
+        from optimization.analytical import AnalyticalOptimizer
+
+        return AnalyticalOptimizer(self.swap, self.price0, self.price1).optimize(budget)
