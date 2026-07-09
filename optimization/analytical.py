@@ -168,7 +168,13 @@ class AnalyticalOptimizer:
             L_max = B_tokens / eps_budget if eps_budget > 0 else 0.0
 
             if j == 0:
-                L0 = (net_total / cap_per_L - P) if cap_per_L > 0 else 0.0
+                # The swap enters this tick at the current price (mid-tick), so
+                # containment uses the capacity actually traversed (current price
+                # down to the lower boundary), not the full tick width. Using the
+                # full width underestimates L0 and lets the optimizer pick a
+                # liquidity below containment, where the closed-form model (which
+                # assumes the swap stays in the tick) diverges from simulation.
+                L0 = (net_total / traversed_cap - P) if traversed_cap > 0 else 0.0
             else:
                 Dm = dx - P * cap_per_L
                 cap_prev = out[j - 1].cap_per_L

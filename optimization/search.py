@@ -1,12 +1,18 @@
 import math
 import random
 
-def ternary_search_max(func, low, high, epsilon=1e-6):
+def ternary_search_max(func, low, high, epsilon=1e-6, max_iter=100):
     a, b = low, high
     # Evaluate at boundaries initially
     f_low = func(low)
     f_high = func(high)
-    while b - a > epsilon:
+    # max_iter bounds the worst case: when high is large (e.g. L_max in the
+    # billions) the epsilon test alone needs ~90+ iterations and can stall.
+    # Each iteration shrinks the interval by 2/3, so 100 iterations give
+    # ~1e-18 relative precision, far tighter than needed.
+    for _ in range(max_iter):
+        if b - a <= epsilon:
+            break
         mid1 = a + (b - a)/3
         mid2 = b - (b - a)/3
         f1 = func(mid1)
