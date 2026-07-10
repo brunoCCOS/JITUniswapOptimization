@@ -115,7 +115,7 @@ class AnalyticalOptimizer:
         ranges = []
         if direction_up:
             lo = start_tick
-            while lo < end_tick:
+            while lo <= end_tick:
                 ranges.append((lo, lo + ts))
                 lo += ts
         else:
@@ -193,6 +193,7 @@ class AnalyticalOptimizer:
             # when the JIT cannot contain the swap in this range (L < L0).
             fc_slope = px * F * traversed_cap - py * traversed_eps
 
+            n_ranges = len(ranges)
             if j == 0:
                 # The swap enters this tick at the current price (mid-tick), so
                 # containment uses the capacity actually traversed (current price
@@ -201,6 +202,11 @@ class AnalyticalOptimizer:
                 # liquidity below containment, where the closed-form model (which
                 # assumes the swap stays in the tick) diverges from simulation.
                 L0 = (net_total / traversed_cap - P) if traversed_cap > 0 else 0.0
+            elif j == n_ranges - 1:
+                # Terminal range (deepest): any remaining trade is fully absorbed
+                # here regardless of L, so the minimum containment liquidity is 0.
+                # (MATLAB: L0j(abs(k_q-k)) = 0)
+                L0 = 0.0
             else:
                 Dm = dx - P * cap_per_L
                 cap_prev = out[j - 1].cap_per_L
@@ -248,12 +254,12 @@ class AnalyticalOptimizer:
         """Optimal liquidity for the innermost range (j=0)."""
         R, P, C = p.R, p.P, p.C
         if R > F and P >= F * C / (R - F):
-            L = p.L0                                    # (a)
+            L = p.L0                                    # (a) — not capped at L_max (MATLAB: max(0,L0))
         elif F > R and P >= R * C / (F - R):
             L = p.L_max                                 # (b)
         else:
             L = max(p.L0, min(p.L_inner, p.L_max))      # (c)
-        return min(max(0.0, L), p.L_max)
+        return max(0.0, L)
 
     @classmethod
     def _lemma_5_2(cls, p: TickParams, prev: TickParams, F, px):
@@ -272,7 +278,7 @@ class AnalyticalOptimizer:
         elif R < F and F < R * ratio and P >= R * C / (F - R):
             L_low = p.L_max                                   # (b)
         elif (R < F and F < R * ratio and P < R * C / (F - R)) or \
-             (R > F and P < F * C / (R - F)):
+             (R > F and P < F * C / (R - F)) or R == F:
             L_low = cls._lemma_5_1(p, F)                       # (c)
         else:                                                 # (d)
             L0_up = min(prev.L0, prev.L_max)
@@ -283,7 +289,7 @@ class AnalyticalOptimizer:
                 L_low, L_up = 0.0, L0_up
             else:
                 L_low = L_cand
-        return min(max(0.0, L_low), p.L_max), L_up
+        return max(0.0, L_low), L_up
 
     @classmethod
     def _range_utility(cls, p: TickParams, L, F, px) -> float:
