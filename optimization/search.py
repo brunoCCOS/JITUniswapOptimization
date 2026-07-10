@@ -1,15 +1,17 @@
 import math
 import random
 
-def ternary_search_max(func, low, high, epsilon=1e-6, max_iter=100):
+def ternary_search_max(func, low, high, epsilon=1e-6, max_iter=25):
     a, b = low, high
     # Evaluate at boundaries initially
     f_low = func(low)
     f_high = func(high)
     # max_iter bounds the worst case: when high is large (e.g. L_max in the
-    # billions) the epsilon test alone needs ~90+ iterations and can stall.
-    # Each iteration shrinks the interval by 2/3, so 100 iterations give
-    # ~1e-18 relative precision, far tighter than needed.
+    # billions) the epsilon test alone needs ~90+ iterations and can stall,
+    # which drives the combinatorial optimizer's O(N^2) range search into a
+    # blow-up. Each iteration shrinks the interval by 2/3, so 25 iterations give
+    # ~4e-5 relative precision -- ample, since the utility is flat near its
+    # optimum -- while cutting the per-range simulation count ~4x versus 100.
     for _ in range(max_iter):
         if b - a <= epsilon:
             break

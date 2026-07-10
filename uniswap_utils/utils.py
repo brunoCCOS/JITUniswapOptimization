@@ -1,4 +1,5 @@
 from decimal import Decimal
+from functools import lru_cache
 from uniswap_utils import Numerical
 import os
 
@@ -7,6 +8,7 @@ def print_debug(msg: str):
     if os.getenv("DEBUG") == "1":
         print(msg)
 
+@lru_cache(maxsize=131072)
 def sqrt_price_from_tick(tick: int,
                          dec0: int,
                          dec1: int):

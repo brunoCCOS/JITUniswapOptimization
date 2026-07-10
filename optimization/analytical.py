@@ -47,6 +47,8 @@ class TickParams:
     L_max: float      # budget cap
     cap_per_L: float  # input token per L across the full range
     traversed_cap: float  # input token per L actually traversed (partial for j=0)
+    fc_slope: float   # fully-crossed (linear) utility per unit L over the
+                      # traversed slice; used when L < L0 (swap not contained)
 
 
 class AnalyticalOptimizer:
@@ -88,12 +90,17 @@ class AnalyticalOptimizer:
         current_tick = tick_from_sqrt_price(state.price, dec0, dec1)
         start_tick, _ = get_rounded_tick(current_tick, ts)
         end_tick = self.swap.simulate(Position(0, 0, 0))["final_tick"]
-        if end_tick == current_tick:
-            return self._empty()
 
         ranges = self._build_ranges(start_tick, end_tick, ts, direction_up)
         if not ranges:
-            return self._empty()
+            # The swap stays within the current tick-space range (it does not
+            # cross a range boundary). Lemma 5.1 still applies to that single
+            # range and can prescribe positive liquidity, so fall back to it
+            # instead of returning "no JIT". (Gating on integer-tick equality
+            # wrongly skipped this whole class of swaps and made the result
+            # depend on an integer-tick crossing irrelevant to the tick-space
+            # ranges actually optimized over.)
+            ranges = [(start_tick, start_tick + ts)]
 
         params = self._precompute(
             ranges, Delta_x, B_tokens, px, py, F, init_sqrt, canon_sqrt
@@ -142,10 +149,14 @@ class AnalyticalOptimizer:
             # Capacity the trade actually traverses in this range. The swap starts
             # inside range j=0, so it only crosses from the initial price to the
             # boundary, not the full range; deeper ranges are fully traversed.
+            # traversed_cap is the input token (X) per L over the traversed slice;
+            # traversed_eps is the deposited token (Y) per L over that same slice.
             if j == 0:
                 traversed_cap = max(0.0, 1.0 / sqrt_lo - 1.0 / init_sqrt)
+                traversed_eps = max(0.0, init_sqrt - sqrt_lo)
             else:
                 traversed_cap = cap_per_L
+                traversed_eps = eps_budget
 
             # Remaining trade after passive liquidity absorbs the earlier ranges,
             # using each range's actually-traversed capacity.
@@ -167,6 +178,13 @@ class AnalyticalOptimizer:
             L_inner = (C * A) / (1.0 - A) - P if A < 1.0 else float("inf")
             L_max = B_tokens / eps_budget if eps_budget > 0 else 0.0
 
+            # Fully-crossed (linear) utility per unit L, over the slice the swap
+            # actually traverses: u_fc(L) = px*F*T - py*y with T = L*traversed_cap
+            # (token X executed) and y = L*traversed_eps (token Y deposited/paid).
+            # This is the paper's crossed-tick utility and is the correct value
+            # when the JIT cannot contain the swap in this range (L < L0).
+            fc_slope = px * F * traversed_cap - py * traversed_eps
+
             if j == 0:
                 # The swap enters this tick at the current price (mid-tick), so
                 # containment uses the capacity actually traversed (current price
@@ -182,7 +200,8 @@ class AnalyticalOptimizer:
             L0 = max(0.0, L0)
 
             out.append(TickParams(lower, upper, P, dx, R, C, A,
-                                  L_inner, L0, L_max, cap_per_L, traversed_cap))
+                                  L_inner, L0, L_max, cap_per_L, traversed_cap,
+                                  fc_slope))
         return out
 
     def _solve(self, params: list[TickParams], F, px) -> dict:
@@ -191,8 +210,12 @@ class AnalyticalOptimizer:
         Returns the position only ({lower_tick, upper_tick, liquidity}); the
         closed-form utility is used solely for internal ranking here.
         """
+        # A rational JIT LP always has the option to add nothing (L=0, utility 0),
+        # so 0 is the floor: never report a position whose utility is negative
+        # (the paper's "Point 1" caveat). This mirrors the combinatorial optimizer,
+        # whose line search includes L=0.
         best_position = self._empty()
-        best_score = float("-inf")
+        best_score = 0.0
         for j, p in enumerate(params):
             if j == 0:
                 target, L = p, self._lemma_5_1(p, F)
@@ -201,7 +224,7 @@ class AnalyticalOptimizer:
                 L_low, L_up = self._lemma_5_2(p, prev, F, px)
                 target, L = (prev, L_up) if L_up > 0 else (p, L_low)
 
-            score = self._utility(L, target.P, target.dx, target.R, target.C, F, px)
+            score = self._range_utility(target, L, F, px)
             if score > best_score:
                 best_score = score
                 best_position = {"lower_tick": target.lower,
@@ -245,14 +268,31 @@ class AnalyticalOptimizer:
             L_low = max(p.L0, min(p.L_inner, p.L_max))        # (c)
         else:                                                 # (d)
             L0_up = min(prev.L0, prev.L_max)
-            U_up = cls._utility(L0_up, prev.P, prev.dx, prev.R, prev.C, F, px)
+            U_up = cls._range_utility(prev, L0_up, F, px)
             L_cand = max(p.L0, min(p.L_inner, p.L_max))
-            U_low = cls._utility(L_cand, P, p.dx, R, C, F, px)
+            U_low = cls._range_utility(p, min(L_cand, p.L_max), F, px)
             if U_up > U_low:
                 L_low, L_up = 0.0, L0_up
             else:
                 L_low = L_cand
         return min(max(0.0, L_low), p.L_max), L_up
+
+    @classmethod
+    def _range_utility(cls, p: TickParams, L, F, px) -> float:
+        """Utility of liquidity L in range p, valid across BOTH regimes.
+
+        If L contains the swap (L >= L0) the tick is terminal and the concave
+        contained-utility applies. Otherwise the swap crosses the tick and only
+        the linear fully-crossed utility (over the traversed slice) is earned.
+        The two coincide at L = L0. Using the contained formula when L < L0
+        overvalues ranges the budget cannot hold the swap in -- the defect that
+        made the analytical rank an infeasible range above the true optimum.
+        """
+        if L <= 0:
+            return 0.0
+        if L >= p.L0:
+            return cls._utility(L, p.P, p.dx, p.R, p.C, F, px)
+        return max(0.0, L * p.fc_slope)
 
     @staticmethod
     def _utility(L, P, dx, R, C, F, px, psi=1.0):
