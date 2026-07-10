@@ -176,7 +176,15 @@ class AnalyticalOptimizer:
 
             A = math.sqrt((F / R) * (P / (C + P))) if (R > 0 and C + P > 0) else 0.0
             L_inner = (C * A) / (1.0 - A) - P if A < 1.0 else float("inf")
-            L_max = B_tokens / eps_budget if eps_budget > 0 else 0.0
+            # For j=0 the range straddles the current price; the JIT LP must deposit
+            # both tokens. Cost = token0_portion*(px/py) + token1_portion.
+            # For j>0 the range is fully below current price → only token1 needed.
+            if j == 0:
+                token0_portion = max(0.0, 1.0 / init_sqrt - 1.0 / sqrt_hi)
+                eps_actual = token0_portion * (px / py) + traversed_eps
+            else:
+                eps_actual = eps_budget
+            L_max = B_tokens / eps_actual if eps_actual > 0 else 0.0
 
             # Fully-crossed (linear) utility per unit L, over the slice the swap
             # actually traverses: u_fc(L) = px*F*T - py*y with T = L*traversed_cap
@@ -265,12 +273,12 @@ class AnalyticalOptimizer:
             L_low = p.L_max                                   # (b)
         elif (R < F and F < R * ratio and P < R * C / (F - R)) or \
              (R > F and P < F * C / (R - F)):
-            L_low = max(p.L0, min(p.L_inner, p.L_max))        # (c)
+            L_low = cls._lemma_5_1(p, F)                       # (c)
         else:                                                 # (d)
             L0_up = min(prev.L0, prev.L_max)
             U_up = cls._range_utility(prev, L0_up, F, px)
-            L_cand = max(p.L0, min(p.L_inner, p.L_max))
-            U_low = cls._range_utility(p, min(L_cand, p.L_max), F, px)
+            L_cand = cls._lemma_5_1(p, F)
+            U_low = cls._range_utility(p, L_cand, F, px)
             if U_up > U_low:
                 L_low, L_up = 0.0, L0_up
             else:
