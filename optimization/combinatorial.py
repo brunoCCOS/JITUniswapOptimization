@@ -43,7 +43,7 @@ class CombinatorialOptimizer:
 
         # Counterfactual final tick without JIT, and the current (start) tick.
         end_tick = self.swap.simulate(Position(0, 0, 0))["final_tick"]
-        current_tick = tick_from_sqrt_price(state.price, state.dec0, state.dec1)
+        current_tick = tick_from_sqrt_price(state.price_sqrt, state.dec0, state.dec1)
         start_tick, _ = get_rounded_tick(current_tick, ts)
 
         best = {"lower_tick": None, "upper_tick": None, "liquidity": None}
@@ -83,7 +83,7 @@ class CombinatorialOptimizer:
 
                 # Max liquidity affordable in [a, b] with the given budget.
                 max_liq = Position(0, a, b).liqudity_from_budget(
-                    budget, state.price, u.price0, u.price1, state.dec0, state.dec1
+                    budget, state.price_sqrt, u.price0, u.price1, state.dec0, state.dec1
                 )
 
                 # Line search over liquidity, scoring via swap simulation.

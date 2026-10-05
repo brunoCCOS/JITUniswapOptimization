@@ -35,7 +35,7 @@ class Utility:
         return self._utility(Position(liq, lower_tick, upper_tick))
 
     def _utility(self, position):
-        init_amt0, init_amt1 = position.tokens(self.swap.state.price, self.swap.state.dec0, self.swap.state.dec1)
+        init_amt0, init_amt1 = position.tokens(self.swap.state.price_sqrt, self.swap.state.dec0, self.swap.state.dec1)
         init_value = init_amt0 * self.price0 + init_amt1 * self.price1
 
         sim_max = self.swap.simulate(position)

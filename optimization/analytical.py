@@ -31,25 +31,36 @@ from uniswap_utils.utils import (
 )
 
 
+# TODO: The current implementation only accounts for zeroForOne swaps. It does not implement the opposite direction
+
 @dataclass
 class TickParams:
     """Per-range parameters feeding the closed-form solution."""
-
-    lower: int
-    upper: int
-    P: float          # passive liquidity active in the range
-    dx: float         # remaining trade when the swap reaches this range
-    R: float          # entry price x (py/px)
-    C: float          # capacity parameter, dx x sqrt(entry price)
-    A: float          # allocation factor
-    L_inner: float    # interior (first-order) solution
-    L0: float         # minimum liquidity to absorb the remaining trade
-    L_max: float      # budget cap
-    cap_per_L: float  # input token per L across the full range
-    traversed_cap: float  # input token per L actually traversed (partial for j=0)
-    fc_slope: float   # fully-crossed (linear) utility per unit L over the
-                      # traversed slice; used when L < L0 (swap not contained)
-
+    lower_idx: int 
+    upper_idx: int
+    lower: float
+    upper: float
+    q_hat: float
+    delta_inv_sqrt_full_range: float
+    delta_inv_sqrt_part_range: float
+    delta_sqrt_full_range: float
+    delta_sqrt_part_range: float
+    dx: float
+    volumes_tokens0_in_range: float
+    traversed_tokens0: float
+    P: float
+    R: float
+    R_prime: float
+    C: float
+    A: float
+    epsilon: float
+    L_max: float
+    L_min: float
+    L_max_budget_dollars: float
+    L_inner: float
+    L_bar: float
+    L_star: float
+    L_B: float
 
 class AnalyticalOptimizer:
     """Closed-form JIT liquidity optimizer (Lemmas 5.1 / 5.2)."""
@@ -62,36 +73,29 @@ class AnalyticalOptimizer:
     # ------------------------------------------------------------------ #
 
     def optimize(self, budget) -> dict:
-        """Return {lower_tick, upper_tick, liquidity, utility} for the best range."""
+        """Return {lower_tick, upper_tick, liquidity, utility} for the best range. `budget` is expressed in dollars."""
         state = self.swap.state
         ts = state.tick_space
+        start_ticks_in_idx = state.start_ticks_in_idx
         dec0, dec1 = state.dec0, state.dec1
         F = 1.0 + float(state.fee_rate)
         Delta_x = float(self.swap.amount_in)
-        direction_up = not self.swap.zeroForOne
 
         # Reframe into canonical (downward) coordinates. px/py are the USD prices
         # of the input/output tokens; canon_sqrt maps a tick to its sqrt price in
         # the canonical frame (identity for a down swap, inverted for an up swap).
-        pool_sqrt = float(state.price)
-        if direction_up:
-            px, py = float(self.price1), float(self.price0)  # in=token1, out=token0
-            init_sqrt = 1.0 / pool_sqrt
-            canon_sqrt = lambda t: 1.0 / float(sqrt_price_from_tick(t, dec0, dec1))
-        else:
-            px, py = float(self.price0), float(self.price1)  # in=token0, out=token1
-            init_sqrt = pool_sqrt
-            canon_sqrt = lambda t: float(sqrt_price_from_tick(t, dec0, dec1))
+        pool_sqrt = float(state.price_sqrt)
+        px, py = float(self.price0), float(self.price1)  # in=token0, out=token1
+        init_sqrt = pool_sqrt
 
-        # Budget in units of the token the JIT LP deposits (the output token py),
-        # mirroring MATLAB's B, where L_max = B / eps.
-        B_tokens = budget / py
+        start_tick = self.get_tick_idx_from_tick_price(math.pow(init_sqrt, 2), start_ticks_in_idx, ts)
+        end_price, end_range = self.simulate_swap(
+            math.pow(init_sqrt, 2), state.passive_dict, 
+            {}, Delta_x, start_ticks_in_idx, ts
+        )
+        end_tick = end_range[0]
 
-        current_tick = tick_from_sqrt_price(state.price, dec0, dec1)
-        start_tick, _ = get_rounded_tick(current_tick, ts)
-        end_tick = self.swap.simulate(Position(0, 0, 0))["final_tick"]
-
-        ranges = self._build_ranges(start_tick, end_tick, ts, direction_up)
+        ranges = self._build_ranges(start_tick, end_tick)
         if not ranges:
             # The swap stays within the current tick-space range (it does not
             # cross a range boundary). Lemma 5.1 still applies to that single
@@ -103,196 +107,414 @@ class AnalyticalOptimizer:
             ranges = [(start_tick, start_tick + ts)]
 
         params = self._precompute(
-            ranges, Delta_x, B_tokens, px, py, F, init_sqrt, canon_sqrt
+            ranges, Delta_x, budget, px, py, F, math.pow(init_sqrt, 2), dec0, dec1
         )
-        return self._solve(params, F, px)
+        return self._solve(params, F, budget, px)
 
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _build_ranges(start_tick, end_tick, ts, direction_up):
+    def get_tick_idx_from_tick_price(tick_price, start_idx, tick_space, base = 1.0001):
+        # TODO: The current implementation does not account for dec0 and dec1. 
+        return math.floor(
+            (math.log(tick_price) / math.log(base) - start_idx) / tick_space
+        )
+
+    @staticmethod
+    def get_tick_price_from_tick_idx(tick_idx, start_idx, tick_space, base = 1.0001):
+        # TODO: The current implementation does not account for dec0 and dec1. 
+        return math.pow(base, start_idx + tick_space * tick_idx)
+
+    @classmethod
+    def simulate_swap(cls, pool_price, passive_dict, positions, amount_in, start_ticks_in_idx, tick_space) -> None | tuple[float, tuple[int, int]]:
+        rem = amount_in
+
+        lower_tick_idx = cls.get_tick_idx_from_tick_price(pool_price, start_ticks_in_idx, tick_space)
+
+        lower_tick = cls.get_tick_price_from_tick_idx(lower_tick_idx, start_ticks_in_idx, tick_space)
+        upper_tick = pool_price
+
+        non_zero_liquidity_tick_idxs = set(
+            [tick_idx for tick_idx, liq in passive_dict.items() if liq > 0]
+        ).union(
+            set([tick_idx for tick_idx, liq in positions.items() if liq > 0])
+        )
+        min_tick_idx_non_empty_liquidity = min(non_zero_liquidity_tick_idxs)
+
+        while rem > 0:
+            consumed = 0
+            K = passive_dict.get(lower_tick_idx, 0) + positions.get(lower_tick_idx, 0)
+
+            if K > 0:
+                consumed = K * (1 / math.sqrt(lower_tick) - 1 / math.sqrt(upper_tick))
+                if rem <= consumed:
+                    final_pool_price = upper_tick / math.pow(
+                        1.0 + rem * math.sqrt(upper_tick) / K, 2
+                    )
+                    final_tick_lower_idx = cls.get_tick_idx_from_tick_price(final_pool_price, start_ticks_in_idx, tick_space)
+                    final_tick_upper_idx = final_tick_lower_idx + 1
+                    return final_pool_price, (final_tick_lower_idx, final_tick_upper_idx)
+                rem -= consumed
+
+            upper_tick = lower_tick
+            lower_tick_idx -= 1
+            lower_tick = cls.get_tick_price_from_tick_idx(lower_tick_idx, start_ticks_in_idx, tick_space)
+
+            if lower_tick_idx < min_tick_idx_non_empty_liquidity:
+                return None
+
+    @staticmethod
+    def _build_ranges(start_tick, end_tick):
         """Ranges from the initial price (j=0) toward the final price."""
         ranges = []
-        if direction_up:
-            lo = start_tick
-            while lo <= end_tick:
-                ranges.append((lo, lo + ts))
-                lo += ts
-        else:
-            hi = start_tick + ts
-            while hi > end_tick:
-                ranges.append((hi - ts, hi))
-                hi -= ts
+        hi = start_tick + 1
+        while hi > end_tick:
+            ranges.append((hi - 1, hi))
+            hi -= 1
         return ranges
 
-    def _precompute(self, ranges, Delta_x, B_tokens, px, py, F,
-                    init_sqrt, canon_sqrt) -> list[TickParams]:
-        """Per-range parameters in canonical (downward) coordinates.
-
-        In this frame the input token flows as 1/sqrt(P) and the deposited token
-        as sqrt(P), so the formulas are the single MATLAB down-direction form
-        regardless of the actual swap direction.
-        """
-        # Fee is charged on top, so the net trade that actually moves the price
-        # (and that passive liquidity absorbs) is the gross amount divided by F.
-        net_total = Delta_x / F
+    def _precompute(self, ranges, Delta_x, budget_dollars, px, py, F, init_price, dec0, dec1) -> list[TickParams]:        
+        # net_total = Delta_x / F     # TODO: Ask what we should do regarding the net_total. Should we ignore the fees here? If so, we will likely need to also update the combinatorial method. 
+        net_total = Delta_x
 
         out: list[TickParams] = []
-        for j, (lower, upper) in enumerate(ranges):
-            # Canonical sqrt-price bounds (sqrt_lo < sqrt_hi always).
-            a, b = canon_sqrt(lower), canon_sqrt(upper)
-            sqrt_lo, sqrt_hi = min(a, b), max(a, b)
+        for j, (lower_idx, upper_idx) in enumerate(ranges):
+            # lower_sqrt, upper_sqrt = float(sqrt_price_from_tick(lower_idx, dec0, dec1)), float(sqrt_price_from_tick(upper_idx, dec0, dec1))
+            # lower, upper = math.pow(lower_sqrt, 2), math.pow(upper_sqrt, 2)
+            lower = self.get_tick_price_from_tick_idx(
+                lower_idx, self.swap.state.start_ticks_in_idx, self.swap.state.tick_space
+            )
+            upper = self.get_tick_price_from_tick_idx(
+                upper_idx, self.swap.state.start_ticks_in_idx, self.swap.state.tick_space
+            )
+            lower_sqrt, upper_sqrt = math.sqrt(lower), math.sqrt(upper)
 
-            cap_per_L = 1.0 / sqrt_lo - 1.0 / sqrt_hi   # input token per L, full range
-            eps_budget = sqrt_hi - sqrt_lo              # deposited token per L
+            q_hat = min(init_price, upper)
+            q_hat_sqrt = math.sqrt(q_hat)
 
-            # Capacity the trade actually traverses in this range. The swap starts
-            # inside range j=0, so it only crosses from the initial price to the
-            # boundary, not the full range; deeper ranges are fully traversed.
-            # traversed_cap is the input token (X) per L over the traversed slice;
-            # traversed_eps is the deposited token (Y) per L over that same slice.
-            if j == 0:
-                traversed_cap = max(0.0, 1.0 / sqrt_lo - 1.0 / init_sqrt)
-                traversed_eps = max(0.0, init_sqrt - sqrt_lo)
-            else:
-                traversed_cap = cap_per_L
-                traversed_eps = eps_budget
+            delta_inv_sqrt_full_range = (1/lower_sqrt - 1/upper_sqrt)
+            delta_inv_sqrt_part_range = (1/lower_sqrt - 1/q_hat_sqrt)
 
-            # Remaining trade after passive liquidity absorbs the earlier ranges,
-            # using each range's actually-traversed capacity.
-            dx = net_total
-            for i in range(j):
-                dx -= out[i].P * out[i].traversed_cap
-            dx = max(0.0, dx)
+            delta_sqrt_full_range = (upper_sqrt - lower_sqrt)
+            delta_sqrt_part_range = (q_hat_sqrt - lower_sqrt)
 
-            # Entry price: actual initial price for j=0, else the boundary the
-            # trade first reaches (the higher sqrt price in canonical coords).
-            sqrt_j = init_sqrt if j == 0 else sqrt_hi
-            price_j = sqrt_j * sqrt_j
+            P = float(self.swap.state.passive_dict.get(lower_idx, 0.0))
 
-            P = float(self.swap.state.passive_dict.get(lower, 0.0))
-            R = price_j * (py / px)
-            C = dx * sqrt_j
+            dx = net_total if j == 0 else out[j-1].dx - out[j-1].traversed_tokens0
 
-            A = math.sqrt((F / R) * (P / (C + P))) if (R > 0 and C + P > 0) else 0.0
-            L_inner = (C * A) / (1.0 - A) - P if A < 1.0 else float("inf")
-            # For j=0 the range straddles the current price; the JIT LP must deposit
-            # both tokens. Cost = token0_portion*(px/py) + token1_portion.
-            # For j>0 the range is fully below current price → only token1 needed.
-            if j == 0:
-                token0_portion = max(0.0, 1.0 / init_sqrt - 1.0 / sqrt_hi)
-                eps_actual = token0_portion * (px / py) + traversed_eps
-            else:
-                eps_actual = eps_budget
-            L_max = B_tokens / eps_actual if eps_actual > 0 else 0.0
+            volumes_tokens0_in_range = P * delta_inv_sqrt_full_range
+            traversed_tokens0 = min(P * delta_inv_sqrt_part_range, dx)
 
-            # Fully-crossed (linear) utility per unit L, over the slice the swap
-            # actually traverses: u_fc(L) = px*F*T - py*y with T = L*traversed_cap
-            # (token X executed) and y = L*traversed_eps (token Y deposited/paid).
-            # This is the paper's crossed-tick utility and is the correct value
-            # when the JIT cannot contain the swap in this range (L < L0).
-            fc_slope = px * F * traversed_cap - py * traversed_eps
+            R = q_hat * py / px # Eq. (34)
+            C = dx * q_hat_sqrt # Eq. (34)
+            A = (F / R) * (P / (C + P)) # Eq. (34)
+            R_prime = None if j == 0 else R * math.sqrt(out[j-1].q_hat / out[j-1].lower)
 
-            n_ranges = len(ranges)
-            if j == 0:
-                # The swap enters this tick at the current price (mid-tick), so
-                # containment uses the capacity actually traversed (current price
-                # down to the lower boundary), not the full tick width. Using the
-                # full width underestimates L0 and lets the optimizer pick a
-                # liquidity below containment, where the closed-form model (which
-                # assumes the swap stays in the tick) diverges from simulation.
-                L0 = (net_total / traversed_cap - P) if traversed_cap > 0 else 0.0
-            elif j == n_ranges - 1:
-                # Terminal range (deepest): any remaining trade is fully absorbed
-                # here regardless of L, so the minimum containment liquidity is 0.
-                # (MATLAB: L0j(abs(k_q-k)) = 0)
-                L0 = 0.0
-            else:
-                Dm = dx - P * cap_per_L
-                cap_prev = out[j - 1].cap_per_L
-                L0 = (Dm / cap_prev) if cap_prev > 0 else 0.0
-            L0 = max(0.0, L0)
+            epsilon = delta_sqrt_full_range * py
 
-            out.append(TickParams(lower, upper, P, dx, R, C, A,
-                                  L_inner, L0, L_max, cap_per_L, traversed_cap,
-                                  fc_slope))
+            L_max = dx / delta_inv_sqrt_part_range - P  # Eq. (32)
+            L_min = max(0, L_max)  # Eq. (37)
+            
+            L_max_budget_dollars = budget_dollars / epsilon
+            
+            L_inner = (C * A) / (1.0 - A) - P          
+
+            L_bar = min(L_max, L_max_budget_dollars)
+
+            L_star = min(max(L_inner, L_min), L_max_budget_dollars) if not math.isclose(F, R) and P < (R * C / (F - R)) else L_max_budget_dollars
+            
+            out.append(TickParams(
+                lower_idx = lower_idx, upper_idx = upper_idx, 
+                lower = lower, upper = upper, 
+                q_hat = q_hat,
+                delta_inv_sqrt_full_range = delta_inv_sqrt_full_range,
+                delta_inv_sqrt_part_range = delta_inv_sqrt_part_range,
+                delta_sqrt_full_range = delta_sqrt_full_range,
+                delta_sqrt_part_range = delta_sqrt_part_range,
+                dx = dx,
+                volumes_tokens0_in_range = volumes_tokens0_in_range,
+                traversed_tokens0 = traversed_tokens0,
+                P = P,
+                R = R,
+                R_prime = R_prime,
+                C = C,
+                A = A,
+                epsilon = epsilon,
+                L_max = L_max,
+                L_min = L_min,
+                L_max_budget_dollars = L_max_budget_dollars,
+                L_inner = L_inner,
+                L_bar = L_bar,
+                L_star = L_star,
+                L_B = None
+            ))
+
+        for j, params in enumerate(out[:-1]):
+            params_prev = out[j + 1]
+
+            L_B_num = (
+                (params_prev.P + params_prev.L_max_budget_dollars)
+                * params_prev.delta_inv_sqrt_full_range
+                + params.P * params.delta_inv_sqrt_part_range - params.dx
+            )
+
+            sqrt_lower_prev = params_prev.lower
+            sqrt_lower = params.lower
+            sqrt_q_hat = params.q_hat
+            
+            L_B_den = (
+                (1/sqrt_lower_prev - 1/sqrt_q_hat)
+                * (sqrt_q_hat - sqrt_lower) / sqrt_lower
+            )
+
+            params.L_B = L_B_num / L_B_den
         return out
 
-    def _solve(self, params: list[TickParams], F, px) -> dict:
-        """Pick the best position, ranking candidates by the closed-form utility.
+    def _solve(self, params: list[TickParams], F, budget, px) -> dict:
+        """Pick the best positions, ranking candidates by the closed-form utility.
 
-        Returns the position only ({lower_tick, upper_tick, liquidity}); the
-        closed-form utility is used solely for internal ranking here.
+        Returns the consecutive positions only ({t_{m - 1}, t_{m}, L_{m - 1}}, {t_{m}, t_{m + 1}, L_{m}}); 
         """
         # A rational JIT LP always has the option to add nothing (L=0, utility 0),
         # so 0 is the floor: never report a position whose utility is negative
         # (the paper's "Point 1" caveat). This mirrors the combinatorial optimizer,
         # whose line search includes L=0.
-        best_position = self._empty()
-        best_score = 0.0
-        for j, p in enumerate(params):
-            if j == 0:
-                target, L = p, self._lemma_5_1(p, F)
-            else:
-                prev = params[j - 1]
-                L_low, L_up = self._lemma_5_2(p, prev, F, px)
-                target, L = (prev, L_up) if L_up > 0 else (p, L_low)
+        best_positions = self._empty()
+        best_utility = 0.0
 
-            score = self._range_utility(target, L, F, px)
-            if score > best_score:
-                best_score = score
-                best_position = {"lower_tick": target.lower,
-                                 "upper_tick": target.upper, "liquidity": L}
-        return best_position
+        num_ranges = len(params)
+
+        # m_0 = \bar{m} (Lines 2 and 3 in Algorithm 1)
+        if num_ranges == 1:
+            p = params[0]
+            L_m = self._proposition_3_1(p, F, L_max = 0)
+            utility_value = F * L_m / (L_m + p.P) - p.R * L_m / (p.C + L_m + p.P)
+            return {
+                "positions": [{"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liq": L_m}], 
+                "utility": utility_value
+            }
+    
+        for j in range(num_ranges-1):
+            p, p_prev = params[j], params[j+1]
+            
+            allocations, utility_value = self._theorem_5_3(p, p_prev, F, budget, px)
+            if allocations is None:
+                continue
+
+            L_prev, L_m = allocations
+
+            if utility_value >= best_utility:
+                best_positions = [
+                    {"lower_tick": p_prev.lower_idx, "upper_tick": p_prev.upper_idx, "liq": L_prev},
+                    {"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liq": L_m},
+                ]
+                best_utility = utility_value
+                print(utility_value, best_positions, end = "\n\n")
+            
+        return {"positions": best_positions, "utility": best_utility}
 
     # ------------------------------------------------------------------ #
     #  Lemmas (liquidity is always clamped to the budget cap L_max)      #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _lemma_5_1(p: TickParams, F) -> float:
-        """Optimal liquidity for the innermost range (j=0)."""
-        R, P, C = p.R, p.P, p.C
+    @classmethod
+    def _proposition_3_1(cls, p: TickParams, F, L_max = 0) -> float:
+        # Single tick range solution
+        # Also used within Lemma 5.2
+
+        P = p.P
+        R = p.R
+        C = p.C
+
+        # F = R
+        if math.isclose(F, R):
+            print("Proposition 3.1 (F = R)")
+            return min(
+                math.sqrt(P * (C + P)),
+                p.L_max_budget_dollars
+            )
+
+        # Case (a):
         if R > F and P >= F * C / (R - F):
-            L = p.L0                                    # (a) — not capped at L_max (MATLAB: max(0,L0))
-        elif F > R and P >= R * C / (F - R):
-            L = p.L_max                                 # (b)
-        else:
-            L = max(p.L0, min(p.L_inner, p.L_max))      # (c)
-        return max(0.0, L)
+            print("Proposition 3.1 (a)")
+            return L_max
+
+        # Case (b): F > R and P >= RC / (F - R)
+        if F > R and P >= R * C / (F - R):
+            print("Proposition 3.1 (b)")
+            return p.L_max_budget_dollars
+
+        # Case (c):
+        # F > R and P < RC/(F-R), or
+        # R > F and P < FC/(R-F)
+        print("Proposition 3.1 (c)")
+        return max(L_max, min(p.L_inner, p.L_max_budget_dollars))
 
     @classmethod
-    def _lemma_5_2(cls, p: TickParams, prev: TickParams, F, px):
-        """
-        Optimal liquidity for outer ranges (j>0).
+    def _lemma_5_1(cls, p: TickParams, p_prev: TickParams, F, B, px) -> None | tuple[float, float]:
+        # General tick ranges solution (P1_m)
+        
+        L_prev_min = max(0, p_prev.L_max)  # Eq. (37), and is equivalent to max(0, p_prev.L_max) (see Eqs. (30)-(32))
 
-        Returns (L_low, L_up): liquidity in the current range, or (regime
-        (d)-upper) in the previous range instead.
-        """
-        R, P, C = p.R, p.P, p.C
-        ratio = math.sqrt(prev.R / R) if (prev.R > 0 and R > 0) else 1.0
-        L_up = 0.0
+        feasible = L_prev_min <= p_prev.L_max_budget_dollars
 
-        if R > F and P >= F * C / (R - F):
-            L_low = 0.0                                       # (a)
-        elif R < F and F < R * ratio and P >= R * C / (F - R):
-            L_low = p.L_max                                   # (b)
-        elif (R < F and F < R * ratio and P < R * C / (F - R)) or \
-             (R > F and P < F * C / (R - F)) or R == F:
-            L_low = cls._lemma_5_1(p, F)                       # (c)
-        else:                                                 # (d)
-            L0_up = min(prev.L0, prev.L_max)
-            U_up = cls._range_utility(prev, L0_up, F, px)
-            L_cand = cls._lemma_5_1(p, F)
-            U_low = cls._range_utility(p, L_cand, F, px)
-            if U_up > U_low:
-                L_low, L_up = 0.0, L0_up
-            else:
-                L_low = L_cand
-        return max(0.0, L_low), L_up
+        if not feasible:
+            print("No feasible solution can be provided by Lemma 5.1")
+            return None
+
+        R0, C0, P0,= p_prev.R, p_prev.C, p_prev.P
+        q_hat, lower_tick = p.q_hat, p.lower
+        
+        # Caso (c)
+        if math.isclose(R0, F):
+            print("Candidate solution is given by Lemma 5.1 (c)")
+            solution_L_prev = min(
+                max(math.sqrt(P0 * (C0 + P0)), L_prev_min),
+                p_prev.L_max_budget_dollars
+            )
+            return (solution_L_prev, 0)
+
+        if R0 > F:
+            threshold = F * C0 / (R0 - F)
+
+            # Case (a)
+            if P0 >= threshold:
+                print("Candidate solution is given by Lemma 5.1 (a)")
+                return (L_prev_min, 0)
+
+            # Case (b)
+            print("Candidate solution is given by Lemma 5.1 (b)")
+            return (
+                min(
+                    max(p_prev.L_inner, p_prev.L_min), 
+                    p_prev.L_max_budget_dollars
+                ), 0
+            )
+
+        # From here, R0 < F
+        R0_prime = p_prev.R_prime
+        threshold = R0 * C0 / (F - R0)
+
+        if F <= R0_prime:
+            # Case (d)
+            if P0 >= threshold:
+                print("Candidate solution is given by Lemma 5.1 (d)")
+                return (p_prev.L_max_budget_dollars, 0)
+
+            # Case (e)
+            print("Candidate solution is given by Lemma 5.1 (e)")
+            return (min(p_prev.L_inner, p_prev.L_max_budget_dollars), 0)
+
+        # Case (f)
+        P, L_max, epsilon = p.P, p.L_max, p.epsilon
+        lower_tick_prev, epsilon_prev = p_prev.lower, p_prev.epsilon
+        
+        L_bar = min(L_max, p.L_max_budget_dollars)
+        L_prev_star = min(p_prev.L_inner, p_prev.L_max_budget_dollars) if P0 < threshold else p_prev.L_max_budget_dollars
+
+        sqrt_lower_tick_prev = math.sqrt(lower_tick_prev)
+        sqrt_lower_tick = math.sqrt(lower_tick)
+        sqrt_q_hat = math.sqrt(q_hat)
+        range_m_amount_in = p.dx
+
+        L_B_num = (
+            (P0 + p_prev.L_max_budget_dollars)
+            * p_prev.delta_inv_sqrt_part_range
+            + P * p.delta_inv_sqrt_part_range - range_m_amount_in
+        )
+        L_B_den = (
+            (1/sqrt_lower_tick_prev - 1/sqrt_q_hat)
+            * (sqrt_q_hat - sqrt_lower_tick) / sqrt_lower_tick
+        )
+        L_B = L_B_num / L_B_den
+
+        L_prev_R, L_R = (0, L_bar) if L_B >= L_bar else (
+            (B - epsilon * L_B) / epsilon_prev, L_B
+        )
+
+        first_candidate_solution = (L_prev_star, 0)
+        second_candidate_solution = (L_prev_R, L_R)
+
+        first_candidate_utility = cls._range_utility(
+            p, p_prev, first_candidate_solution[0], first_candidate_solution[1], F, px
+        )
+
+        second_candidate_utility = cls._range_utility(
+            p, p_prev, second_candidate_solution[0], second_candidate_solution[1], F, px
+        )
+
+        if first_candidate_utility >= second_candidate_utility:
+            print("Candidate solution is given by the first solution of Lemma 5.1 (f)")
+            return first_candidate_solution
+
+        print(first_candidate_solution, first_candidate_utility)
+        print(second_candidate_solution, second_candidate_utility)
+        print("Candidate solution is given by the second solution of Lemma 5.1 (f)")
+        return second_candidate_solution
 
     @classmethod
-    def _range_utility(cls, p: TickParams, L, F, px) -> float:
+    def _lemma_5_2(cls, p: TickParams, F) -> None | tuple[float, float]:
+        # General tick ranges solution (P2_m)
+
+        print("Candidate solution is given by Lemma 5.2. Calling Proposition 3.1...")
+
+        L_max = p.L_max
+        feasible = L_max <= p.L_max_budget_dollars
+
+        if not feasible:
+            print("No feasible solution can be provided by Lemma 5.2")
+            return None
+
+        # L*_m from Proposition 3.1 for tick range m, according to Lemma 5.2
+        L_star = cls._proposition_3_1(p, F, 0)
+        L_tilde = max(L_max, L_star)
+
+        return (0.0, L_tilde)
+
+    @classmethod
+    def _theorem_5_3(cls, p: TickParams, p_prev: TickParams, F, B, px):
+        solution_lemma_5_1 = cls._lemma_5_1(p, p_prev, F, B, px)
+        solution_lemma_5_2 = cls._lemma_5_2(p, F)
+
+        utility_solution_lemma_5_1 = -math.inf if solution_lemma_5_1 is None else cls._range_utility(
+            p, p_prev, solution_lemma_5_1[0], solution_lemma_5_1[1], F, px
+        )
+
+        utility_solution_lemma_5_2 = -math.inf if solution_lemma_5_2 is None else cls._range_utility(
+            p, p_prev, solution_lemma_5_2[0], solution_lemma_5_2[1], F, px
+        )
+
+        # Case (o)
+        if solution_lemma_5_1 is None and solution_lemma_5_2 is None:
+            print("No feasible solution can be given by Theorem 5.3 (o)")
+            return (None, -math.inf)
+
+        # Case (i)
+        if solution_lemma_5_1 is not None and solution_lemma_5_2 is None:
+            print("Candidate solution is given by Theorem 5.3 (i)")
+            return (solution_lemma_5_1, utility_solution_lemma_5_1)
+
+        if solution_lemma_5_2 is not None:
+            # Case (ii)
+            if math.pow(p.A, 2) * p.q_hat <= p.lower:
+                print("Candidate solution is given by Lemma 5.1, according to Theorem 5.3 (ii)")
+                return (solution_lemma_5_1, utility_solution_lemma_5_1)
+
+            # Case (iii)
+            else: 
+                if utility_solution_lemma_5_1 >= utility_solution_lemma_5_2:
+                    print("Candidate solution is given by Lemma 5.1, according to Theorem 5.3 (iii)")
+                    return (solution_lemma_5_1, utility_solution_lemma_5_1)
+                else:
+                    print("Candidate solution is given by Lemma 5.2, according to Theorem 5.3 (iii)")
+                    return (solution_lemma_5_2, utility_solution_lemma_5_2)
+
+        raise NotImplementedError(
+            "None of the cases covered by Theorem 5.3 could be applied for the input parameters."
+        )
+
+    @classmethod
+    def _range_utility(cls, p: TickParams, p_prev: TickParams, L_prev, L_m, F, px) -> float:
         """Utility of liquidity L in range p, valid across BOTH regimes.
 
         If L contains the swap (L >= L0) the tick is terminal and the concave
@@ -302,25 +524,22 @@ class AnalyticalOptimizer:
         overvalues ranges the budget cannot hold the swap in -- the defect that
         made the analytical rank an infeasible range above the true optimum.
         """
-        if L <= 0:
-            return 0.0
-        if L >= p.L0:
-            return cls._utility(L, p.P, p.dx, p.R, p.C, F, px)
-        return max(0.0, L * p.fc_slope)
+        
+        q_hat, lower, dx, P, C, R = p.q_hat, p.lower, p.dx, p.P, p.C, p.R
+        R0, R0_prime, C0, P0 = p_prev.R, p_prev.R_prime, p_prev.C, p_prev.P
 
-    @staticmethod
-    def _utility(L, P, dx, R, C, F, px, psi=1.0):
-        """Closed-form utility (MATLAB utility.m): JIT LP's fees + price impact."""
-        if L <= 0:
-            return 0.0
-        total = L + P
-        if total == 0 or (C + total) == 0:
-            return 0.0
-        const = px * (L / total) * dx
-        const_psi = px * (L**psi / (L**psi + P**psi)) * dx
-        fees = const_psi * (F - 1)
-        return fees + const_psi - const * R * total / (C + total)
+        if L_m < p.L_max:
+            # Eq. (33)
+            range_m_term = px * L_m * (F - R0_prime) * (math.sqrt(p.q_hat) - math.sqrt(p.lower)) / math.sqrt(lower * q_hat)
+
+            dx_prev = dx - (L_m + P) * p.delta_inv_sqrt_part_range # Eq. (32)
+            range_prev_term = px * dx_prev * (F - R0 * (L_prev + P0)/(C0 + L_prev + P0)) * L_prev / (L_prev + P0)
+            
+            return range_m_term + range_prev_term
+        
+        # Utility function in the sentence below Eq. (33)
+        return px * dx * (F - R * (L_m + P)/(C + L_m + P)) * L_m / (L_m + P)
 
     @staticmethod
     def _empty() -> dict:
-        return {"lower_tick": None, "upper_tick": None, "liquidity": None}
+        return None
