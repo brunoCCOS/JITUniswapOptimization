@@ -94,6 +94,7 @@ def get_tick_from_sqrt_price(
         )
     else:
         tick = (transformed_tick_idx - Decimal(offset)).to_integral_value(rounding = ROUND_HALF_EVEN)
+        tick = (tick // tick_space) * tick_space
 
     return int(tick)
 

@@ -20,6 +20,7 @@ model's own terms but need not produce identical numbers.
 """
 
 import math
+import click
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -90,6 +91,9 @@ class AnalyticalOptimizer:
         init_sqrt = pool_sqrt
 
         start_tick = self._get_tick_idx_from_tick_price(math.pow(init_sqrt, 2), tick_idx_offset, ts, dec0, dec1)
+
+        click.echo(f"\n\nTick sqrt price: {init_sqrt}, Start tick: {start_tick}")
+
         _, end_range = self.simulate_swap(
             Decimal(init_sqrt) ** 2, state.passive_dict, 
             {}, Delta_x, tick_idx_offset, ts, dec0, dec1
@@ -97,6 +101,9 @@ class AnalyticalOptimizer:
         end_tick = end_range[0]
 
         ranges = self._build_ranges(start_tick, end_tick, ts)
+
+        click.echo(f"\n\n{ranges}\n\n")
+        
         if not ranges:
             # The swap stays within the current tick-space range (it does not
             # cross a range boundary). Lemma 5.1 still applies to that single
@@ -105,7 +112,7 @@ class AnalyticalOptimizer:
             # wrongly skipped this whole class of swaps and made the result
             # depend on an integer-tick crossing irrelevant to the tick-space
             # ranges actually optimized over.)
-            ranges = [(start_tick, start_tick + ts)]
+            ranges = [(start_tick, self._move_tick_idx(start_tick, 1, ts))]
 
         print(ranges)
         params = self._precompute(
@@ -173,14 +180,15 @@ class AnalyticalOptimizer:
             if lower_tick_idx < min_tick_idx_non_empty_liquidity:
                 return None
 
-    @staticmethod
-    def _build_ranges(start_tick, end_tick, ts):
+    @classmethod
+    def _build_ranges(cls, start_tick, end_tick, ts):
         """Ranges from the initial price (j=0) toward the final price."""
         ranges = []
-        hi = start_tick + ts
+        hi = cls._move_tick_idx(start_tick, 1, ts)
         while hi > end_tick:
-            ranges.append((hi - ts, hi))
-            hi -= ts
+            lo = cls._move_tick_idx(hi, -1, ts)
+            ranges.append((lo, hi))
+            hi = lo
         return ranges
 
     def _precompute(self, ranges, Delta_x, budget_dollars, px, py, F, init_price, dec0, dec1) -> list[TickParams]:        
@@ -300,9 +308,9 @@ class AnalyticalOptimizer:
         if num_ranges == 1:
             p = params[0]
             L_m = self._proposition_3_1(p, F, L_max = 0)
-            utility_value = self._range_utility(F, px, p, L_m)
+            utility_value = self._utility(F, px, p, L_m)
             return {
-                "positions": [{"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liq": L_m}], 
+                "positions": [{"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liquidity": L_m}], 
                 "utility": utility_value
             }
     
@@ -433,11 +441,11 @@ class AnalyticalOptimizer:
         first_candidate_solution = (L_prev_star, 0)
         second_candidate_solution = (L_prev_R, L_R)
 
-        first_candidate_utility = cls._range_utility(
+        first_candidate_utility = cls._utility(
             F, px, p, first_candidate_solution[0], p_prev, first_candidate_solution[1]
         )
 
-        second_candidate_utility = cls._range_utility(
+        second_candidate_utility = cls._utility(
             F, px, p, second_candidate_solution[0], p_prev, second_candidate_solution[1]
         )
 
@@ -474,11 +482,11 @@ class AnalyticalOptimizer:
         solution_lemma_5_1 = cls._lemma_5_1(p, p_prev, F, B, px)
         solution_lemma_5_2 = cls._lemma_5_2(p, F)
 
-        utility_solution_lemma_5_1 = -math.inf if solution_lemma_5_1 is None else cls._range_utility(
+        utility_solution_lemma_5_1 = -math.inf if solution_lemma_5_1 is None else cls._utility(
             F, px, p, solution_lemma_5_1[0], p_prev, solution_lemma_5_1[1]
         )
 
-        utility_solution_lemma_5_2 = -math.inf if solution_lemma_5_2 is None else cls._range_utility(
+        utility_solution_lemma_5_2 = -math.inf if solution_lemma_5_2 is None else cls._utility(
             F, px, p, solution_lemma_5_2[0], p_prev, solution_lemma_5_2[1]
         )
 
@@ -512,7 +520,7 @@ class AnalyticalOptimizer:
         )
 
     @classmethod
-    def _range_utility(cls, F, px, p: TickParams, L_m, p_prev: TickParams = None, L_prev = None) -> float:
+    def _utility(cls, F, px, p: TickParams, L_m, p_prev: TickParams = None, L_prev = None) -> float:
         """Utility of liquidity L in range p, valid across BOTH regimes.
 
         If L contains the swap (L >= L0) the tick is terminal and the concave
@@ -524,24 +532,24 @@ class AnalyticalOptimizer:
         """
         
         q_hat, lower, dx, P, C, R = p.q_hat, p.lower, p.dx, p.P, p.C, p.R
+
+        if L_m > p.L_max:
+            # Utility function in the sentence below Eq. (33)
+            return px * dx * (F - R * (L_m + P)/(C + L_m + P)) * L_m / (L_m + P)
+        
         R0, R0_prime, C0, P0 = p_prev.R, p_prev.R_prime, p_prev.C, p_prev.P
 
-        if L_m <= p.L_max:
-            # Eq. (33)
-            range_m_term = px * L_m * (F - R0_prime) * (math.sqrt(p.q_hat) - math.sqrt(p.lower)) / math.sqrt(lower * q_hat)
+        # Eq. (33)
+        range_m_term = px * L_m * (F - R0_prime) * (math.sqrt(p.q_hat) - math.sqrt(p.lower)) / math.sqrt(lower * q_hat)
 
-            dx_prev = dx - (L_m + P) * p.delta_inv_sqrt_part_range # Eq. (32)
+        dx_prev = dx - (L_m + P) * p.delta_inv_sqrt_part_range # Eq. (32)
 
-            import click
-            click.echo(f"\n\nTickParams m: {p}\n\n")
-            click.echo(f"\n\nTickParams m-1: {p_prev}\n\n")
+        click.echo(f"\n\nTickParams m: {p}\n\n")
+        click.echo(f"\n\nTickParams m-1: {p_prev}\n\n")
 
-            range_prev_term = px * dx_prev * (F - R0 * (L_prev + P0)/(C0 + L_prev + P0)) * L_prev / (L_prev + P0)
-            
-            return range_m_term + range_prev_term
+        range_prev_term = px * dx_prev * (F - R0 * (L_prev + P0)/(C0 + L_prev + P0)) * L_prev / (L_prev + P0)
         
-        # Utility function in the sentence below Eq. (33)
-        return px * dx * (F - R * (L_m + P)/(C + L_m + P)) * L_m / (L_m + P)
+        return range_m_term + range_prev_term
 
     @staticmethod
     def _empty() -> dict:
