@@ -20,7 +20,6 @@ model's own terms but need not produce identical numbers.
 """
 
 import math
-import click
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -82,6 +81,7 @@ class AnalyticalOptimizer:
         dec0, dec1 = state.dec0, state.dec1
         F = 1.0 + float(state.fee_rate)
         Delta_x = float(self.swap.amount_in)
+        direction_up = not self.swap.zeroForOne
 
         # Reframe into canonical (downward) coordinates. px/py are the USD prices
         # of the input/output tokens; canon_sqrt maps a tick to its sqrt price in
@@ -92,8 +92,6 @@ class AnalyticalOptimizer:
 
         start_tick = self._get_tick_idx_from_tick_price(math.pow(init_sqrt, 2), tick_idx_offset, ts, dec0, dec1)
 
-        click.echo(f"\n\nTick sqrt price: {init_sqrt}, Start tick: {start_tick}")
-
         _, end_range = self.simulate_swap(
             Decimal(init_sqrt) ** 2, state.passive_dict, 
             {}, Delta_x, tick_idx_offset, ts, dec0, dec1
@@ -101,8 +99,6 @@ class AnalyticalOptimizer:
         end_tick = end_range[0]
 
         ranges = self._build_ranges(start_tick, end_tick, ts)
-
-        click.echo(f"\n\n{ranges}\n\n")
         
         if not ranges:
             # The swap stays within the current tick-space range (it does not
@@ -114,7 +110,6 @@ class AnalyticalOptimizer:
             # ranges actually optimized over.)
             ranges = [(start_tick, self._move_tick_idx(start_tick, 1, ts))]
 
-        print(ranges)
         params = self._precompute(
             ranges, Delta_x, budget, px, py, F, math.pow(init_sqrt, 2), dec0, dec1
         )
@@ -308,11 +303,8 @@ class AnalyticalOptimizer:
         if num_ranges == 1:
             p = params[0]
             L_m = self._proposition_3_1(p, F, L_max = 0)
-            utility_value = self._utility(F, px, p, L_m)
-            return {
-                "positions": [{"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liquidity": L_m}], 
-                "utility": utility_value
-            }
+            utility_value = self._range_utility(F, px, p, L_m)
+            return [{"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liquidity": L_m}]
     
         for j in range(num_ranges-1):
             p, p_prev = params[j], params[j+1]
@@ -325,13 +317,13 @@ class AnalyticalOptimizer:
 
             if utility_value >= best_utility:
                 best_positions = [
-                    {"lower_tick": p_prev.lower_idx, "upper_tick": p_prev.upper_idx, "liq": L_prev},
-                    {"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liq": L_m},
+                    {"lower_tick": p_prev.lower_idx, "upper_tick": p_prev.upper_idx, "liquidity": L_prev},
+                    {"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liquidity": L_m},
                 ]
                 best_utility = utility_value
                 print(utility_value, best_positions, end = "\n\n")
             
-        return {"positions": best_positions, "utility": best_utility}
+        return best_positions
 
     # ------------------------------------------------------------------ #
     #  Lemmas (liquidity is always clamped to the budget cap L_max)      #
@@ -441,11 +433,11 @@ class AnalyticalOptimizer:
         first_candidate_solution = (L_prev_star, 0)
         second_candidate_solution = (L_prev_R, L_R)
 
-        first_candidate_utility = cls._utility(
+        first_candidate_utility = cls._range_utility(
             F, px, p, first_candidate_solution[0], p_prev, first_candidate_solution[1]
         )
 
-        second_candidate_utility = cls._utility(
+        second_candidate_utility = cls._range_utility(
             F, px, p, second_candidate_solution[0], p_prev, second_candidate_solution[1]
         )
 
@@ -482,11 +474,11 @@ class AnalyticalOptimizer:
         solution_lemma_5_1 = cls._lemma_5_1(p, p_prev, F, B, px)
         solution_lemma_5_2 = cls._lemma_5_2(p, F)
 
-        utility_solution_lemma_5_1 = -math.inf if solution_lemma_5_1 is None else cls._utility(
+        utility_solution_lemma_5_1 = -math.inf if solution_lemma_5_1 is None else cls._range_utility(
             F, px, p, solution_lemma_5_1[0], p_prev, solution_lemma_5_1[1]
         )
 
-        utility_solution_lemma_5_2 = -math.inf if solution_lemma_5_2 is None else cls._utility(
+        utility_solution_lemma_5_2 = -math.inf if solution_lemma_5_2 is None else cls._range_utility(
             F, px, p, solution_lemma_5_2[0], p_prev, solution_lemma_5_2[1]
         )
 
@@ -520,7 +512,7 @@ class AnalyticalOptimizer:
         )
 
     @classmethod
-    def _utility(cls, F, px, p: TickParams, L_m, p_prev: TickParams = None, L_prev = None) -> float:
+    def _range_utility(cls, F, px, p: TickParams, L_m, p_prev: TickParams = None, L_prev = None) -> float:
         """Utility of liquidity L in range p, valid across BOTH regimes.
 
         If L contains the swap (L >= L0) the tick is terminal and the concave
@@ -543,9 +535,6 @@ class AnalyticalOptimizer:
         range_m_term = px * L_m * (F - R0_prime) * (math.sqrt(p.q_hat) - math.sqrt(p.lower)) / math.sqrt(lower * q_hat)
 
         dx_prev = dx - (L_m + P) * p.delta_inv_sqrt_part_range # Eq. (32)
-
-        click.echo(f"\n\nTickParams m: {p}\n\n")
-        click.echo(f"\n\nTickParams m-1: {p_prev}\n\n")
 
         range_prev_term = px * dx_prev * (F - R0 * (L_prev + P0)/(C0 + L_prev + P0)) * L_prev / (L_prev + P0)
         

@@ -22,33 +22,41 @@ class Utility:
 
     def utility_liq(self, liq):
         position = Position(liq, self.lower_tick, self.upper_tick)
-        return self._utility(position)
+        return self.positions_utility(position)
 
     def utility_tick(self, lower,upper):
         position = Position(self.liq, lower, upper)
-        return self._utility(position)
+        return self.positions_utility(position)
 
-    def position_utility(self, lower_tick, upper_tick, liq):
-        """Simulation-based utility of a given position (end_value - init_value + fees)."""
-        if liq is None:
-            return None
-        return self._utility(Position(liq, lower_tick, upper_tick))
+    def positions_utility(self, position: Position | list[Position]):
+        positions = [position] if type(position) is Position else position
 
-    def _utility(self, position):
-        init_amt0, init_amt1 = position.tokens(self.swap.state.price_sqrt, self.swap.state.dec0, self.swap.state.dec1)
+        init_amt0, init_amt1 = 0, 0
+        for position in positions:
+            pos_amt0, pos_amt1 = position.tokens(self.swap.state.price_sqrt, self.swap.state.dec0, self.swap.state.dec1)
+            init_amt0 += pos_amt0
+            init_amt1 += pos_amt1
         init_value = init_amt0 * self.price0 + init_amt1 * self.price1
 
-        sim_max = self.swap.simulate(position)
-        
-        end_amt0, end_amt1 = position.tokens(sim_max["final_sqrt_price"], self.swap.state.dec0, self.swap.state.dec1)
+        sim_max = self.swap.simulate(positions)
+
+        end_amt0, end_amt1 = 0, 0
+        for position in positions:
+            pos_amt0, pos_amt1 = position.tokens(sim_max["final_sqrt_price"], self.swap.state.dec0, self.swap.state.dec1)
+            end_amt0 += pos_amt0
+            end_amt1 += pos_amt1
         end_value = end_amt0 * self.price0 + end_amt1 * self.price1
+
         price_impact = end_value - init_value
+
         fees = (
             sim_max["fees_jit_lp"] * self.price0 
             if self.swap.zeroForOne
             else sim_max["fees_jit_lp"] * self.price1
         )
+
         utility_max = price_impact + fees
+        
         return utility_max
 
     def optimize(self,
@@ -68,7 +76,7 @@ class Utility:
           computing the optimal liquidity per candidate tick directly (fast).
 
         The optimizers only choose the position. The reported utility is always
-        computed the same way afterward, via swap simulation (position_utility),
+        computed the same way afterward, via swap simulation (positionpositions_utility),
         so results are comparable regardless of which optimizer was used.
 
         Args:
@@ -82,20 +90,24 @@ class Utility:
         """
         if method in ("combinatorial", "combinatory", "numerical"):
             position = self._optimize_combinatorial(budget, opt_func, **func_args)
+            positions = [Position(
+                liq = position["liquidity"],
+                lower_tick = position["lower_tick"],
+                upper_tick = position["upper_tick"],
+            )]
         elif method == "analytical":
-            position = self._optimize_analytical(budget)
+            positions = [Position(
+                liq = position["liquidity"],
+                lower_tick = position["lower_tick"],
+                upper_tick = position["upper_tick"],
+            ) for position in self._optimize_analytical(budget)]
         else:
             raise ValueError(
                 f"Unknown optimization method {method!r}; "
                 "expected 'combinatorial' or 'analytical'."
             )
 
-        return {
-            **position,
-            "utility": self.position_utility(
-                position["lower_tick"], position["upper_tick"], position["liquidity"]
-            ),
-        }
+        return positions
 
     def _optimize_combinatorial(self, budget, opt_func, **func_args):
         """

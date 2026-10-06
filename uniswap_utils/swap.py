@@ -74,7 +74,6 @@ class Swap:
     def simulate(
         self,
         position: list[Position] | Position,
-        discount_fee = True
     ) -> dict:
         """
         Simulate a swap using Q96 integer arithmetic (same approach as the enricher).
@@ -232,6 +231,9 @@ class Swap:
             "fees_passive_lp": fees_passive / 10 ** dec_in,
             "fees_jit_lp": fees_jit / 10 ** dec_in,
         }
+
+    def get_gross_amount_in(self):
+        return self.amount_in / (1 + self.state.fee_rate)
 
     def __repr__(self):
         return str(self.__dict__)
