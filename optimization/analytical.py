@@ -21,13 +21,14 @@ model's own terms but need not produce identical numbers.
 
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 
 from uniswap_utils.swap import Swap
 from uniswap_utils.position import Position
 from uniswap_utils.utils import (
-    tick_from_sqrt_price,
-    get_rounded_tick,
-    sqrt_price_from_tick,
+    get_tick_from_sqrt_price,
+    get_sqrt_price_from_tick,
+    move_tick_idx
 )
 
 
@@ -76,7 +77,7 @@ class AnalyticalOptimizer:
         """Return {lower_tick, upper_tick, liquidity, utility} for the best range. `budget` is expressed in dollars."""
         state = self.swap.state
         ts = state.tick_space
-        start_ticks_in_idx = state.start_ticks_in_idx
+        tick_idx_offset = state.tick_idx_offset
         dec0, dec1 = state.dec0, state.dec1
         F = 1.0 + float(state.fee_rate)
         Delta_x = float(self.swap.amount_in)
@@ -88,14 +89,14 @@ class AnalyticalOptimizer:
         px, py = float(self.price0), float(self.price1)  # in=token0, out=token1
         init_sqrt = pool_sqrt
 
-        start_tick = self.get_tick_idx_from_tick_price(math.pow(init_sqrt, 2), start_ticks_in_idx, ts)
-        end_price, end_range = self.simulate_swap(
-            math.pow(init_sqrt, 2), state.passive_dict, 
-            {}, Delta_x, start_ticks_in_idx, ts
+        start_tick = self._get_tick_idx_from_tick_price(math.pow(init_sqrt, 2), tick_idx_offset, ts, dec0, dec1)
+        _, end_range = self.simulate_swap(
+            Decimal(init_sqrt) ** 2, state.passive_dict, 
+            {}, Delta_x, tick_idx_offset, ts, dec0, dec1
         )
         end_tick = end_range[0]
 
-        ranges = self._build_ranges(start_tick, end_tick)
+        ranges = self._build_ranges(start_tick, end_tick, ts)
         if not ranges:
             # The swap stays within the current tick-space range (it does not
             # cross a range boundary). Lemma 5.1 still applies to that single
@@ -106,33 +107,44 @@ class AnalyticalOptimizer:
             # ranges actually optimized over.)
             ranges = [(start_tick, start_tick + ts)]
 
+        print(ranges)
         params = self._precompute(
             ranges, Delta_x, budget, px, py, F, math.pow(init_sqrt, 2), dec0, dec1
         )
         return self._solve(params, F, budget, px)
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _move_tick_idx(i, delta, tick_space):
+        return move_tick_idx(i, delta, relative = False, tick_space = tick_space)
 
     @staticmethod
-    def get_tick_idx_from_tick_price(tick_price, start_idx, tick_space, base = 1.0001):
-        # TODO: The current implementation does not account for dec0 and dec1. 
-        return math.floor(
-            (math.log(tick_price) / math.log(base) - start_idx) / tick_space
+    def _get_tick_idx_from_tick_price(tick_price, tick_idx_offset, tick_space, dec0, dec1):
+        return get_tick_from_sqrt_price(
+            Decimal(tick_price).sqrt(), dec0, dec1, base = Decimal("1.0001"),
+            relative = False, offset = tick_idx_offset, tick_space = tick_space, human = True
         )
 
     @staticmethod
-    def get_tick_price_from_tick_idx(tick_idx, start_idx, tick_space, base = 1.0001):
-        # TODO: The current implementation does not account for dec0 and dec1. 
-        return math.pow(base, start_idx + tick_space * tick_idx)
+    def _get_tick_price_from_tick_idx(tick_idx, tick_idx_offset, tick_space, dec0, dec1):
+        sqrt_price = get_sqrt_price_from_tick(
+            tick_idx, dec0, dec1, base = Decimal("1.0001"),
+            relative = False, offset = tick_idx_offset, tick_space = tick_space, human = True
+        )
+        return sqrt_price ** 2
 
     @classmethod
-    def simulate_swap(cls, pool_price, passive_dict, positions, amount_in, start_ticks_in_idx, tick_space) -> None | tuple[float, tuple[int, int]]:
-        rem = amount_in
+    def simulate_swap(
+        cls, pool_price: Decimal, passive_dict, positions, amount_in, tick_idx_offset, tick_space, dec0, dec1
+    ) -> None | tuple[float, tuple[int, int]]:
+        pool_price = Decimal(pool_price)
+        rem = Decimal(amount_in)
 
-        lower_tick_idx = cls.get_tick_idx_from_tick_price(pool_price, start_ticks_in_idx, tick_space)
+        lower_tick_idx = cls._get_tick_idx_from_tick_price(pool_price, tick_idx_offset, tick_space, dec0, dec1)
 
-        lower_tick = cls.get_tick_price_from_tick_idx(lower_tick_idx, start_ticks_in_idx, tick_space)
+        lower_tick = cls._get_tick_price_from_tick_idx(lower_tick_idx, tick_idx_offset, tick_space, dec0, dec1)
         upper_tick = pool_price
+        upper_tick_sqrt = upper_tick.sqrt()
 
         non_zero_liquidity_tick_idxs = set(
             [tick_idx for tick_idx, liq in passive_dict.items() if liq > 0]
@@ -143,50 +155,50 @@ class AnalyticalOptimizer:
 
         while rem > 0:
             consumed = 0
-            K = passive_dict.get(lower_tick_idx, 0) + positions.get(lower_tick_idx, 0)
+            K = Decimal(passive_dict.get(lower_tick_idx, 0) + positions.get(lower_tick_idx, 0))
 
             if K > 0:
-                consumed = K * (1 / math.sqrt(lower_tick) - 1 / math.sqrt(upper_tick))
+                consumed = K * (Decimal(1) / lower_tick.sqrt() - Decimal(1) / upper_tick_sqrt)
                 if rem <= consumed:
-                    final_pool_price = upper_tick / math.pow(
-                        1.0 + rem * math.sqrt(upper_tick) / K, 2
-                    )
-                    final_tick_lower_idx = cls.get_tick_idx_from_tick_price(final_pool_price, start_ticks_in_idx, tick_space)
-                    final_tick_upper_idx = final_tick_lower_idx + 1
+                    final_pool_price = upper_tick / ((Decimal(1) + rem * upper_tick_sqrt / K) ** 2)
+                    final_tick_lower_idx = cls._get_tick_idx_from_tick_price(final_pool_price, tick_idx_offset, tick_space, dec0, dec1)
+                    final_tick_upper_idx = cls._move_tick_idx(final_tick_lower_idx, 1, tick_space = tick_space)
                     return final_pool_price, (final_tick_lower_idx, final_tick_upper_idx)
                 rem -= consumed
 
             upper_tick = lower_tick
             lower_tick_idx -= 1
-            lower_tick = cls.get_tick_price_from_tick_idx(lower_tick_idx, start_ticks_in_idx, tick_space)
+            lower_tick = cls._get_tick_price_from_tick_idx(lower_tick_idx, tick_idx_offset, tick_space, dec0, dec1)
 
             if lower_tick_idx < min_tick_idx_non_empty_liquidity:
                 return None
 
     @staticmethod
-    def _build_ranges(start_tick, end_tick):
+    def _build_ranges(start_tick, end_tick, ts):
         """Ranges from the initial price (j=0) toward the final price."""
         ranges = []
-        hi = start_tick + 1
+        hi = start_tick + ts
         while hi > end_tick:
-            ranges.append((hi - 1, hi))
-            hi -= 1
+            ranges.append((hi - ts, hi))
+            hi -= ts
         return ranges
 
     def _precompute(self, ranges, Delta_x, budget_dollars, px, py, F, init_price, dec0, dec1) -> list[TickParams]:        
         # net_total = Delta_x / F     # TODO: Ask what we should do regarding the net_total. Should we ignore the fees here? If so, we will likely need to also update the combinatorial method. 
         net_total = Delta_x
 
+        init_price = float(init_price)
+
         out: list[TickParams] = []
         for j, (lower_idx, upper_idx) in enumerate(ranges):
             # lower_sqrt, upper_sqrt = float(sqrt_price_from_tick(lower_idx, dec0, dec1)), float(sqrt_price_from_tick(upper_idx, dec0, dec1))
             # lower, upper = math.pow(lower_sqrt, 2), math.pow(upper_sqrt, 2)
-            lower = self.get_tick_price_from_tick_idx(
-                lower_idx, self.swap.state.start_ticks_in_idx, self.swap.state.tick_space
-            )
-            upper = self.get_tick_price_from_tick_idx(
-                upper_idx, self.swap.state.start_ticks_in_idx, self.swap.state.tick_space
-            )
+            lower = float(self._get_tick_price_from_tick_idx(
+                lower_idx, self.swap.state.tick_idx_offset, self.swap.state.tick_space, dec0, dec1
+            ))
+            upper = float(self._get_tick_price_from_tick_idx(
+                upper_idx, self.swap.state.tick_idx_offset, self.swap.state.tick_space, dec0, dec1
+            ))
             lower_sqrt, upper_sqrt = math.sqrt(lower), math.sqrt(upper)
 
             q_hat = min(init_price, upper)
@@ -207,7 +219,7 @@ class AnalyticalOptimizer:
 
             R = q_hat * py / px # Eq. (34)
             C = dx * q_hat_sqrt # Eq. (34)
-            A = (F / R) * (P / (C + P)) # Eq. (34)
+            A = math.sqrt((F / R) * (P / (C + P)))
             R_prime = None if j == 0 else R * math.sqrt(out[j-1].q_hat / out[j-1].lower)
 
             epsilon = delta_sqrt_full_range * py
@@ -288,7 +300,7 @@ class AnalyticalOptimizer:
         if num_ranges == 1:
             p = params[0]
             L_m = self._proposition_3_1(p, F, L_max = 0)
-            utility_value = F * L_m / (L_m + p.P) - p.R * L_m / (p.C + L_m + p.P)
+            utility_value = self._range_utility(F, px, p, L_m)
             return {
                 "positions": [{"lower_tick": p.lower_idx, "upper_tick": p.upper_idx, "liq": L_m}], 
                 "utility": utility_value
@@ -412,21 +424,7 @@ class AnalyticalOptimizer:
         L_bar = min(L_max, p.L_max_budget_dollars)
         L_prev_star = min(p_prev.L_inner, p_prev.L_max_budget_dollars) if P0 < threshold else p_prev.L_max_budget_dollars
 
-        sqrt_lower_tick_prev = math.sqrt(lower_tick_prev)
-        sqrt_lower_tick = math.sqrt(lower_tick)
-        sqrt_q_hat = math.sqrt(q_hat)
-        range_m_amount_in = p.dx
-
-        L_B_num = (
-            (P0 + p_prev.L_max_budget_dollars)
-            * p_prev.delta_inv_sqrt_part_range
-            + P * p.delta_inv_sqrt_part_range - range_m_amount_in
-        )
-        L_B_den = (
-            (1/sqrt_lower_tick_prev - 1/sqrt_q_hat)
-            * (sqrt_q_hat - sqrt_lower_tick) / sqrt_lower_tick
-        )
-        L_B = L_B_num / L_B_den
+        L_B = p.L_B
 
         L_prev_R, L_R = (0, L_bar) if L_B >= L_bar else (
             (B - epsilon * L_B) / epsilon_prev, L_B
@@ -436,11 +434,11 @@ class AnalyticalOptimizer:
         second_candidate_solution = (L_prev_R, L_R)
 
         first_candidate_utility = cls._range_utility(
-            p, p_prev, first_candidate_solution[0], first_candidate_solution[1], F, px
+            F, px, p, first_candidate_solution[0], p_prev, first_candidate_solution[1]
         )
 
         second_candidate_utility = cls._range_utility(
-            p, p_prev, second_candidate_solution[0], second_candidate_solution[1], F, px
+            F, px, p, second_candidate_solution[0], p_prev, second_candidate_solution[1]
         )
 
         if first_candidate_utility >= second_candidate_utility:
@@ -477,11 +475,11 @@ class AnalyticalOptimizer:
         solution_lemma_5_2 = cls._lemma_5_2(p, F)
 
         utility_solution_lemma_5_1 = -math.inf if solution_lemma_5_1 is None else cls._range_utility(
-            p, p_prev, solution_lemma_5_1[0], solution_lemma_5_1[1], F, px
+            F, px, p, solution_lemma_5_1[0], p_prev, solution_lemma_5_1[1]
         )
 
         utility_solution_lemma_5_2 = -math.inf if solution_lemma_5_2 is None else cls._range_utility(
-            p, p_prev, solution_lemma_5_2[0], solution_lemma_5_2[1], F, px
+            F, px, p, solution_lemma_5_2[0], p_prev, solution_lemma_5_2[1]
         )
 
         # Case (o)
@@ -514,7 +512,7 @@ class AnalyticalOptimizer:
         )
 
     @classmethod
-    def _range_utility(cls, p: TickParams, p_prev: TickParams, L_prev, L_m, F, px) -> float:
+    def _range_utility(cls, F, px, p: TickParams, L_m, p_prev: TickParams = None, L_prev = None) -> float:
         """Utility of liquidity L in range p, valid across BOTH regimes.
 
         If L contains the swap (L >= L0) the tick is terminal and the concave
@@ -528,11 +526,16 @@ class AnalyticalOptimizer:
         q_hat, lower, dx, P, C, R = p.q_hat, p.lower, p.dx, p.P, p.C, p.R
         R0, R0_prime, C0, P0 = p_prev.R, p_prev.R_prime, p_prev.C, p_prev.P
 
-        if L_m < p.L_max:
+        if L_m <= p.L_max:
             # Eq. (33)
             range_m_term = px * L_m * (F - R0_prime) * (math.sqrt(p.q_hat) - math.sqrt(p.lower)) / math.sqrt(lower * q_hat)
 
             dx_prev = dx - (L_m + P) * p.delta_inv_sqrt_part_range # Eq. (32)
+
+            import click
+            click.echo(f"\n\nTickParams m: {p}\n\n")
+            click.echo(f"\n\nTickParams m-1: {p_prev}\n\n")
+
             range_prev_term = px * dx_prev * (F - R0 * (L_prev + P0)/(C0 + L_prev + P0)) * L_prev / (L_prev + P0)
             
             return range_m_term + range_prev_term
