@@ -196,7 +196,7 @@ def _decimal_simulate(swap, position):
 
     state = swap.state
     remaining = Decimal(swap.amount_in)
-    current_sqrt = Decimal(state.price)
+    current_sqrt = Decimal(state.price_sqrt)
     current_tick = tick_from_sqrt_price(current_sqrt, state.dec0, state.dec1)
     jit_liq = position.to_dict(state.tick_space)
     fee_rate = Decimal(state.fee_rate)

@@ -1,13 +1,103 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_EVEN
 from functools import lru_cache
 from uniswap_utils import Numerical
 import os
-
 
 def print_debug(msg: str):
     if os.getenv("DEBUG") == "1":
         print(msg)
 
+def move_tick_idx(i, delta, relative: bool = False, tick_space: int = 1):
+    if relative: 
+        return i + delta
+    else:
+        return i + delta * tick_space
+
+def get_sqrt_price_from_tick(
+    i: int,
+    dec0: int,
+    dec1: int,
+    *,
+    base: Decimal = Decimal("1.0001"),
+    relative: bool = False,
+    offset: int = 0,
+    tick_space: int = 1,
+    human: bool = True,
+) -> Decimal:
+    """
+    Compute the sqrt price associated with a tick index.
+
+    The tick value is derived from the index according to the selected
+    indexing scheme.
+
+    Absolute mode:
+        tick_idx = offset + floor(i / tick_space) * tick_space
+
+    Relative mode:
+        tick_idx = offset + tick_space * i
+
+    The price associated with the tick is:
+        price = base ** tick_idx
+
+    When `human=True`, token decimal scaling is applied:
+        price = base ** tick_idx * 10 ** (dec0 - dec1)
+
+    Returns:
+        The square root of the price associated with the tick.
+    """
+
+    if tick_space <= 0:
+        raise ValueError("tick_space must be positive")
+
+    if relative:
+        tick = offset + tick_space * i
+    else:
+        tick = offset + (i // tick_space) * tick_space
+
+    tick = Decimal(tick)
+    base = Decimal(str(base))
+
+    sqrt_price = base ** (tick / Decimal(2))
+
+    if human:
+        decimal_adjustment = Decimal(10) ** (
+            Decimal(dec0 - dec1) / Decimal(2)
+        )
+        sqrt_price *= decimal_adjustment
+
+    return sqrt_price
+
+def get_tick_from_sqrt_price(
+    sqrt_price: Decimal,
+    dec0: int,
+    dec1: int,
+    *,
+    base: Decimal = Decimal("1.0001"),
+    relative: bool = False,
+    offset: int = 0,
+    tick_space: int = 1,
+    human: bool = True,
+) -> int:
+    """
+    Convert a sqrt price to its corresponding tick index.
+
+    When relative=True, rounds down to the nearest tick_space.
+    When human=True, adjusts for the token decimal difference.
+    """
+    human_delta = Decimal(dec1 - dec0) if human else Decimal(0)
+
+    transformed_tick_idx = (Decimal(2) * sqrt_price.log10() + human_delta) / base.log10()
+
+    if relative:
+        tick = ((transformed_tick_idx - Decimal(offset)) / Decimal(tick_space)).to_integral_value(
+            rounding = ROUND_HALF_EVEN
+        )
+    else:
+        tick = (transformed_tick_idx - Decimal(offset)).to_integral_value(rounding = ROUND_HALF_EVEN)
+
+    return int(tick)
+
+# Just for retrocompatibility with previous implementations.
 @lru_cache(maxsize=131072)
 def sqrt_price_from_tick(tick: int,
                          dec0: int,
@@ -17,9 +107,15 @@ def sqrt_price_from_tick(tick: int,
         sqrt(P) = 1.0001^(tick/2) / 10^((dec1 - dec0)/2)
     where P = price of token1 in terms of token0.
     """
-    sqrt_price = (Decimal("1.0001") ** (Decimal(tick) / 2)) / (
-        Decimal(10) ** ((Decimal(dec1) - Decimal(dec0)) / 2)
+    sqrt_price = get_sqrt_price_from_tick(
+        tick, dec0, dec1, 
+        base = Decimal("1.0001"),
+        relative = False, 
+        offset = 0, 
+        tick_space = 1, 
+        human = True
     )
+    
     return sqrt_price
 
 

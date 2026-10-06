@@ -73,17 +73,21 @@ class Swap:
 
     def simulate(
         self,
-        position: Position,
+        position: list[Position] | Position,
+        discount_fee = True
     ) -> dict:
         """
         Simulate a swap using Q96 integer arithmetic (same approach as the enricher).
 
-        Inputs (state.price, passive_dict, amount_in) are in library/human units.
+        Inputs (state.price_sqrt, passive_dict, amount_in) are in library/human units.
         Internally everything is converted to raw Q96 integers to avoid slow Decimal
         arithmetic.  Outputs are converted back to library units before returning,
         so the external interface is unchanged.
         """
         import math
+        
+        positions = [position] if type(position) is Position else position
+            
 
         Q96 = 1 << 96
         dec0, dec1 = self.state.dec0, self.state.dec1
@@ -108,9 +112,11 @@ class Swap:
             }
 
         # Convert starting price and JIT position to raw integer units
-        current_sqrt_x96 = int(float(self.state.price) * sqrt_adj * Q96)
+        current_sqrt_x96 = int(float(self.state.price_sqrt) * sqrt_adj * Q96)
         passive_raw = self._passive_raw
-        jit_raw = {k: int(float(v) * liq_scale) for k, v in position.to_dict(ts).items()}
+        jit_raw = {}
+        for p in positions:
+            jit_raw.update({k: int(float(v) * liq_scale) for k, v in p.to_dict(ts).items()})
 
         # Gross amount in (includes fee) in raw integer tokens
         remaining_in = int(float(self.amount_in) * 10 ** dec_in)
@@ -226,3 +232,6 @@ class Swap:
             "fees_passive_lp": fees_passive / 10 ** dec_in,
             "fees_jit_lp": fees_jit / 10 ** dec_in,
         }
+
+    def __repr__(self):
+        return str(self.__dict__)
