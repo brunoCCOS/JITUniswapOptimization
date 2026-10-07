@@ -22,7 +22,7 @@ def get_sqrt_price_from_tick(
     relative: bool = False,
     offset: int = 0,
     tick_space: int = 1,
-    human: bool = True,
+    human: bool = True
 ) -> Decimal:
     """
     Compute the sqrt price associated with a tick index.

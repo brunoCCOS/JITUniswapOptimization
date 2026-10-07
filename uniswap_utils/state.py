@@ -10,4 +10,3 @@ class State:
     dec0: int
     dec1: int
     tick_idx_offset: int = 0
-
