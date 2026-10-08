@@ -1,3 +1,13 @@
+"""
+Generic 1-D maximizers used to pick the optimal liquidity level for a given
+tick range once the range itself is fixed.
+
+`ternary_search_max` is the one actually used by the optimizers (iteration
+count tuned for speed vs. precision); the other search variants (golden
+section, Fibonacci, random) are alternative/reference implementations of the
+same line-search problem, kept for comparison and experimentation.
+"""
+
 import math
 import random
 

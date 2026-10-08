@@ -1,3 +1,10 @@
+"""
+Immutable snapshot of a pool's state as seen by the optimizer: current
+sqrt-price, the passive (non-JIT) liquidity map keyed by tick, tick spacing,
+fee rate, and token decimals. Consumed by `Swap`/`Position` to simulate how a
+candidate JIT position would interact with the existing passive liquidity.
+"""
+
 from dataclasses import dataclass
 from uniswap_utils import Numerical
 

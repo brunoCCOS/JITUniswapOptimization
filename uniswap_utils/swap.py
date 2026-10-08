@@ -1,3 +1,15 @@
+"""
+Uniswap V3 swap simulator: replays a swap tick-by-tick against a `State`
+(passive liquidity) plus an optional JIT `Position`, using Q96 integer
+arithmetic for precision and speed (see package README for rationale vs.
+`Decimal`).
+
+`Swap.simulate()` is the core scoring primitive called by both optimizers
+(`optimization/utility.py`) to evaluate how much fee revenue / price impact a
+candidate JIT position would produce. Caches passive-liquidity conversion and
+tick->sqrt-price lookups per `Swap` instance, invalidated on `update_state`.
+"""
+
 from decimal import Decimal
 from uniswap_utils.position import Position
 from uniswap_utils.state import State

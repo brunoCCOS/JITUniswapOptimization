@@ -1,3 +1,14 @@
+"""
+Tick <-> sqrt-price arithmetic and active-liquidity lookups shared by
+`State`, `Position`, and `Swap`.
+
+Implements the Uniswap V3 tick math (tick index <-> sqrt price conversion,
+tick rounding to spacing, active liquidity at a given tick from the passive
+liquidity map) using `Decimal` for precision. `uniswap_utils/swap.py` uses a
+separate Q96-integer fast path for simulation; these helpers are the
+general-purpose/reference versions used elsewhere (position sizing, search).
+"""
+
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_EVEN
 from functools import lru_cache
 from uniswap_utils import Numerical

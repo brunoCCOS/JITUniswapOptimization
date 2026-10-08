@@ -1,3 +1,13 @@
+"""
+Facade that ties a `Swap` to a scoring function and dispatches to whichever
+optimizer (`analytical` or `combinatorial`) is requested.
+
+`Utility.optimize(method=...)` is the main entry point used by callers
+(including `uniswap-jit-analysis/src/optimizers.py`): it owns the `Swap`
+instance, exposes `utility_liq`/`set_ticks` for the optimizers to score
+candidate positions, and converts prices between USD and pool-native units.
+"""
+
 from uniswap_utils.swap import Swap
 from uniswap_utils.position import Position
 from optimization.search import ternary_search_max

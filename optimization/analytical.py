@@ -167,16 +167,11 @@ class AnalyticalOptimizer:
         pool_sqrt_price = Decimal(pool_sqrt_price)
         rem = Decimal(amount_in)
 
-        pool_price_tick_idx = canon_tick_idx(pool_sqrt_price)
-        next_tick_idx = canon_get_next_tick_idx(pool_price_tick_idx)
-        next_tick_sqrt = Decimal(canon_sqrt(next_tick_idx))
-
-        if direction_up:
-            lower_tick_idx, upper_tick_idx = pool_price_tick_idx, next_tick_idx
-            lower_tick_sqrt, upper_tick_sqrt = next_tick_sqrt, pool_sqrt_price
-        else:
-            lower_tick_idx, upper_tick_idx = next_tick_idx, pool_price_tick_idx
-            lower_tick_sqrt, upper_tick_sqrt = next_tick_sqrt, pool_sqrt_price
+        # key  = lower tick of the range we are in (key of passive_dict)
+        # exit = tick where the swap leaves that range (down: key, up: key + ts)
+        key = canon_tick_idx(pool_sqrt_price)
+        upper_tick_sqrt = pool_sqrt_price
+        exit_tick = lambda k: move_tick_idx(k, 1, tick_space=tick_space) if direction_up else k
 
         non_zero_liquidity_tick_idxs = set(
             [tick_idx for tick_idx, liq in passive_dict.items() if liq > 0]
@@ -188,7 +183,8 @@ class AnalyticalOptimizer:
 
         while rem > 0:
             consumed = 0
-            K = Decimal(passive_dict.get(lower_tick_idx, 0) + positions.get(lower_tick_idx, 0))
+            lower_tick_sqrt = Decimal(canon_sqrt(exit_tick(key)))
+            K = Decimal(passive_dict.get(key, 0) + positions.get(key, 0))
 
             if K > 0:
                 consumed = K * (Decimal(1) / lower_tick_sqrt - Decimal(1) / upper_tick_sqrt)
@@ -200,11 +196,10 @@ class AnalyticalOptimizer:
                 rem -= consumed
 
             upper_tick_sqrt = lower_tick_sqrt
-            lower_tick_idx = canon_get_next_tick_idx(lower_tick_idx)
-            lower_tick_sqrt = Decimal(canon_sqrt(lower_tick_idx))
+            key = canon_get_next_tick_idx(key)
                 
             # This accounts for both down and up directions when there are no longer positive liquidities allocated in the next ranges
-            if lower_tick_idx < min_tick_idx_non_empty_liquidity or lower_tick_idx > max_tick_idx_non_empty_liquidity:
+            if key < min_tick_idx_non_empty_liquidity or key > max_tick_idx_non_empty_liquidity:
                 return None
 
     @classmethod
@@ -226,8 +221,7 @@ class AnalyticalOptimizer:
         return ranges
 
     def _precompute(self, ranges, Delta_x, budget_dollars, px, py, F, init_sqrt_price, canon_sqrt) -> list[TickParams]:        
-        # net_total = Delta_x / F     # TODO: Ask what we should do regarding the net_total. Should we ignore the fees here? If so, we will likely need to also update the combinatorial method. 
-        net_total = Delta_x
+        net_total = Delta_x / F     # TODO: Ask what we should do regarding the net_total. Should we ignore the fees here? If so, we will likely need to also update the combinatorial method. 
 
         init_sqrt_price = float(init_sqrt_price)
 
@@ -260,7 +254,12 @@ class AnalyticalOptimizer:
             A = math.sqrt((F / R) * (P / (C + P)))
             R_prime = None if j == 0 else R * math.sqrt(out[j-1].q_hat / out[j-1].lower)
 
-            epsilon = delta_sqrt_full_range * py
+            st = self.swap.state
+            epsilon = float(
+                Position(1, lower_idx, upper_idx).value(
+                    st.price_sqrt, self.price0, self.price1, st.dec0, st.dec1
+                )
+            )
 
             L_max = dx / delta_inv_sqrt_part_range - P  # Eq. (32)
             L_min = max(0, L_max)  # Eq. (37)
@@ -312,13 +311,10 @@ class AnalyticalOptimizer:
                 + params.P * params.delta_inv_sqrt_part_range - params.dx
             )
 
-            sqrt_lower_prev = params_prev.lower_sqrt
-            sqrt_lower = params.lower_sqrt
-            sqrt_q_hat = params.q_hat_sqrt
-            
+            # (c_m / c_{m-1})·κ_{m-1} − κ_m, with κ_m over the traversed part [l, q̂]
             L_B_den = (
-                (1/sqrt_lower_prev - 1/sqrt_q_hat)
-                * (sqrt_q_hat - sqrt_lower) / sqrt_lower
+                (params.epsilon / params_prev.epsilon) * params_prev.delta_inv_sqrt_full_range
+                - params.delta_inv_sqrt_part_range
             )
 
             params.L_B = L_B_num / L_B_den

@@ -1,3 +1,12 @@
+"""
+A candidate JIT liquidity position: a tick range plus a liquidity amount.
+
+Provides conversion between a capital budget (amount of token0/token1) and
+the equivalent `liq` value for a given tick range and current price, so
+optimizers can compare positions of different widths on an equal-capital
+basis.
+"""
+
 from decimal import Decimal
 from uniswap_utils.utils import sqrt_price_from_tick
 from uniswap_utils import Numerical
