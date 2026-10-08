@@ -114,9 +114,23 @@ class AnalyticalOptimizer:
 
         start_tick = canon_tick_idx(init_sqrt)
 
+        # The canonical frame is always a "down" (zeroForOne) swap. If the
+        # current price sits exactly on the range's lower tick boundary,
+        # Uniswap's actual active range is the one BELOW (q = t_{m_bar+1} in
+        # the paper), not [start_tick, start_tick+ts) -- that range would have
+        # zero width between its own lower bound and the price, which makes
+        # delta_inv_sqrt_part_range == 0 (ZeroDivisionError in _precompute).
+        if float(canon_sqrt(start_tick)) == float(init_sqrt):
+            start_tick = self._move_tick_idx(start_tick, -1, ts)
+
+        # simulate_swap must be fed the same net (fee-stripped) amount that
+        # _precompute uses (Delta_x / F) -- feeding it the gross amount makes
+        # it walk one range too far, adding a trailing zero-trade range whose
+        # P == 0 can divide by zero downstream.
+        net_amount = Delta_x / F
         _, end_range, remaining = self.simulate_swap(
             Decimal(init_sqrt), state.passive_dict, 
-            {}, Delta_x, tick_idx_offset, ts, dec0, dec1,
+            {}, net_amount, tick_idx_offset, ts, dec0, dec1,
             canon_sqrt, canon_tick_idx, canon_get_next_tick_idx, direction_up
         )
         end_tick = end_range[0]
@@ -182,18 +196,27 @@ class AnalyticalOptimizer:
         max_tick_idx_non_empty_liquidity = max(non_zero_liquidity_tick_idxs)
 
         while rem > 0:
-            consumed = 0
             lower_tick_sqrt = Decimal(canon_sqrt(exit_tick(key)))
             K = Decimal(passive_dict.get(key, 0) + positions.get(key, 0))
 
-            if K > 0:
-                consumed = K * (Decimal(1) / lower_tick_sqrt - Decimal(1) / upper_tick_sqrt)
-                if rem <= consumed:
-                    final_pool_sqrt_price = upper_tick_sqrt / (Decimal(1) + Decimal(rem) * upper_tick_sqrt / K)
-                    final_tick_lower_idx = canon_tick_idx(final_pool_sqrt_price)
-                    final_tick_upper_idx = canon_get_next_tick_idx(final_tick_lower_idx)
-                    return final_pool_sqrt_price, (final_tick_lower_idx, final_tick_upper_idx), 0
-                rem -= consumed
+            if K == 0:
+                # No liquidity in this range: the swap cannot proceed and
+                # stops at the boundary it entered with, matching
+                # Swap.simulate's "Liquidity is zero, exiting loop" and
+                # _build_passive_dict's omission of empty spans. Continuing
+                # past this point (as before) built analytical ranges the
+                # real simulator never reaches.
+                final_tick_lower_idx = canon_tick_idx(upper_tick_sqrt)
+                final_tick_upper_idx = canon_get_next_tick_idx(final_tick_lower_idx)
+                return upper_tick_sqrt, (final_tick_lower_idx, final_tick_upper_idx), rem
+
+            consumed = K * (Decimal(1) / lower_tick_sqrt - Decimal(1) / upper_tick_sqrt)
+            if rem <= consumed:
+                final_pool_sqrt_price = upper_tick_sqrt / (Decimal(1) + Decimal(rem) * upper_tick_sqrt / K)
+                final_tick_lower_idx = canon_tick_idx(final_pool_sqrt_price)
+                final_tick_upper_idx = canon_get_next_tick_idx(final_tick_lower_idx)
+                return final_pool_sqrt_price, (final_tick_lower_idx, final_tick_upper_idx), 0
+            rem -= consumed
 
             upper_tick_sqrt = lower_tick_sqrt
             key = canon_get_next_tick_idx(key)
@@ -566,14 +589,21 @@ class AnalyticalOptimizer:
             # Utility function in the sentence below Eq. (33)
             return px * dx * (F - R * (L_m + P)/(C + L_m + P)) * L_m / (L_m + P)
         
-        R0, R0_prime, C0, P0 = p_prev.R, p_prev.R_prime, p_prev.C, p_prev.P
+        R0, R0_prime, P0 = p_prev.R, p_prev.R_prime, p_prev.P
 
         # Eq. (33)
         range_m_term = px * L_m * (F - R0_prime) * (math.sqrt(p.q_hat) - math.sqrt(p.lower)) / math.sqrt(lower * q_hat)
 
         dx_prev = dx - (L_m + P) * p.delta_inv_sqrt_part_range # Eq. (32)
 
-        range_prev_term = px * dx_prev * (F - R0 * (L_prev + P0)/(C0 + L_prev + P0)) * L_prev / (L_prev + P0)
+        # Eq. (24): the trade size that actually reaches range m-1 is what's
+        # left after L_m, i.e. dx_prev * sqrt(q_hat_{m-1}) -- not p_prev.C
+        # (built from Delta_x_{m-1}(0), the trade reaching m-1 with NO JIT in
+        # m). Using p_prev.C overstates the split's utility and can make it
+        # beat a genuinely better candidate.
+        C0_effective = dx_prev * p_prev.q_hat_sqrt
+
+        range_prev_term = px * dx_prev * (F - R0 * (L_prev + P0)/(C0_effective + L_prev + P0)) * L_prev / (L_prev + P0)
         
         return range_m_term + range_prev_term
 

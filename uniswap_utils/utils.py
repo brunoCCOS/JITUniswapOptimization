@@ -104,7 +104,14 @@ def get_tick_from_sqrt_price(
             rounding = ROUND_HALF_EVEN
         )
     else:
-        tick = (transformed_tick_idx - Decimal(offset)).to_integral_value(rounding = ROUND_HALF_EVEN)
+        # Must floor the raw tick (ROUND_FLOOR) before flooring to tick_space.
+        # Rounding to nearest first (ROUND_HALF_EVEN) can round UP across a
+        # tick-space boundary b when the price sits within half a tick below
+        # it, making the "containing" range [b, b+ts) sit entirely ABOVE the
+        # actual price. That then makes delta_inv_sqrt_part_range negative in
+        # analytical._precompute (q_hat < lower) and consumed negative in
+        # simulate_swap -- about 0.5/tick_space of swaps are affected.
+        tick = (transformed_tick_idx - Decimal(offset)).to_integral_value(rounding = ROUND_FLOOR)
         tick = (tick // tick_space) * tick_space
 
     return int(tick)
