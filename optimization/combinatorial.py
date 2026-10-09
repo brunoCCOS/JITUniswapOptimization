@@ -10,6 +10,7 @@ Relies on the shared Utility object for swap-simulation-based scoring
 """
 
 import sys
+import time
 
 from uniswap_utils.position import Position
 from uniswap_utils.utils import tick_from_sqrt_price, get_rounded_tick
@@ -31,11 +32,15 @@ class CombinatorialOptimizer:
         self.swap = utility.swap
 
     def optimize(self, budget, opt_func=ternary_search_max,
-                 max_number_pos=MAX_NUMBER_POS, **func_args) -> dict:
+                 max_number_pos=MAX_NUMBER_POS,
+                 time_constrain=60,
+                 **func_args) -> dict:
         """Return the best position {lower_tick, upper_tick, liquidity}.
 
         Utility is used internally (via simulation) to rank candidates, but is
-        not returned; the caller scores the chosen position separately.
+        not returned; the caller scores the chosen position separately. The
+        search runs for at most ``time_constrain`` seconds by default (one
+        minute); pass ``None`` to disable the deadline.
         """
         u = self.utility
         state = self.swap.state
@@ -48,6 +53,11 @@ class CombinatorialOptimizer:
 
         best = {"lower_tick": None, "upper_tick": None, "liquidity": None}
         best_utility = float("-inf")
+        deadline = (
+            time.monotonic() + time_constrain
+            if time_constrain is not None
+            else None
+        )
 
         # Candidate ranges span from the current price to the no-JIT final price.
         # For an upward swap end_tick > start_tick; for a downward swap it is
@@ -68,10 +78,15 @@ class CombinatorialOptimizer:
 
         count = 0
         truncated = False
+        timed_out = False
         for width in range(1, max_width + 1):
-            if truncated:
+            if truncated or timed_out:
                 break
             for a in lowers:
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+
                 b = a + width * ts
                 if b > hi + ts:
                     continue
@@ -99,5 +114,8 @@ class CombinatorialOptimizer:
             print(f"[combinatorial] max_number_pos={max_number_pos} reached at "
                   f"width {width}/{max_width}; wider positions skipped "
                   f"(swept span {(hi - lo) // ts} ticks).", file=sys.stderr)
+        elif timed_out:
+            print(f"[combinatorial] time_constrain={time_constrain} seconds reached; "
+                  "returning the best position evaluated so far.", file=sys.stderr)
 
         return best
